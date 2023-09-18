@@ -23,6 +23,7 @@ from geopy.geocoders import Nominatim
 import helper
 from tqdm import tqdm
 from functools import lru_cache
+from threading import Thread
 
 def tictoc(func):
     """By Ricardo Kazuo"""
@@ -156,17 +157,6 @@ def timenow():
     except:
         pass
 
-def finance_db(country_in,append,historical,path):
-    print(f"{country_in}-{append}-{path}")
-    df_symbol = pd.read_csv("FinancialData.csv",on_bad_lines='skip')
-    df_symbol = df_symbol[df_symbol['country'] == country_in]
-    count = len(df_symbol.index)
-    for index,row in tqdm(df_symbol.iterrows(),total=df_symbol.shape[0],file=sys.stdout):
-        fetch_on_stock(row['symbol'],country_in+append,historical,path)
-        #print(row['symbol'] + " - " +str(count))
-        print(f'{index}')
-        count = count - 1
-
 def split_into_dates(file_in):
     """By Ricardo Kazuo"""
     colnames=['Date', 'Ticker', 'Val1', 'Val2', 'Val3', 'Val4']
@@ -235,14 +225,49 @@ def clear_missing_ticker():
          .drop('_merge', axis=1))
     df.drop(columns=['Missing Ticker'])
 
+def threading1(country_in,append,historical,path):
+    print(f"{country_in}-{append}-{path}")
+    df_symbol = pd.read_csv("FinancialData.csv",on_bad_lines='skip')
+    df_symbol = df_symbol[df_symbol['country'] == country_in]
+    count = 0
+    for index,row in tqdm(df_symbol.iterrows(),total=df_symbol.shape[0],file=sys.stdout):
+        fetch_on_stock(row['symbol'],country_in+append,historical,path)
+        #print(row['symbol'] + " - " +str(count))
+        print(f'{row["symbol"]}')
+        count = count + 1
+        if count > (len(df_symbol.index)/2)+1:
+            break
+    df_symbol = df_symbol.reindex(index=df_symbol.index[::-1])
+
+def threading2(country_in,append,historical,path):
+    print(f"{country_in}-{append}-{path}")
+    df_symbol = pd.read_csv("FinancialData.csv",on_bad_lines='skip')
+    df_symbol = df_symbol[df_symbol['country'] == country_in]
+    count = len(df_symbol.index)
+    for index,row in tqdm(df_symbol.iterrows(),total=df_symbol.shape[0],file=sys.stdout):
+        fetch_on_stock(row['symbol'],country_in+append,historical,path)
+        #print(row['symbol'] + " - " +str(count))
+        print(f'{row["symbol"]}')
+        count = count - 1
+        if count < (len(df_symbol.index)/2)-1:
+            break
+
+def finance_db(country_in,append,historical,path):
+    # create two new threads
+    clear_file(path+country_in+str(1)+append)
+    clear_file(path+country_in+str(2)+append)
+    t1 = Thread(target=threading1, args=(country_in,str(1)+append,historical,path))
+    t2 = Thread(target=threading2, args=(country_in,str(2)+append,historical,path))
+    # start the threads
+    t1.start()
+    t2.start()
+    # wait for the threads to complete
+    t1.join()
+    t2.join()
+
 def main():
     wl.fetch_watchlists()
     wl.fetch_data_watchlist()
-    clear_file("./FinFiles/FranceFinancialDataStocksIncremental.csv")
-    clear_file("./FinFiles/BrazilFinancialDataStocksIncremental.csv")
-    clear_file("./FinFiles/GermanyFinancialDataStocksIncremental.csv")
-    clear_file("./FinFiles/JapanFinancialDataStocksIncremental.csv")
-    clear_file("./United StatesFinancialDataStocks.csv")
     finance_db("United States","FinancialDataStocks.csv","Full","./")
     finance_db("Brazil","FinancialDataStocksIncremental.csv","Full","./FinFiles/")
     finance_db("France","FinancialDataStocksIncremental.csv","Full","./FinFiles/")
