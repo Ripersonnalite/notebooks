@@ -2,6 +2,7 @@ from bs4 import BeautifulSoup
 import requests
 import pandas as pd
 import numpy as np
+import Gmail as g
 
 # Function to extract Product Title
 def get_title(soup):
@@ -97,9 +98,18 @@ def get_availability(soup):
         available = "Not Available"	
 
     return available
+
+def clear_file(file_in):
+    """By Ricardo Kazuo"""
+    try:
+        file_to_delete = open(file_in,'w')
+        file_to_delete.close()
+    except:
+        pass
     
 if __name__ == '__main__':
     data = pd.DataFrame()
+    clear_file("amazon_data.csv")
     # add your user agent 
     HEADERS = ({'User-Agent':'', 'Accept-Language': 'en-US, en;q=0.5'})
     
@@ -118,7 +128,7 @@ if __name__ == '__main__':
     for product in products:
         print("---------------->"+product)
         for addres in address:
-        print("---------------->"+addres)
+            print("---------------->"+addres)
             try:
                 # HTTP Request
                 webpage = requests.get(addres+product, headers=HEADERS)
@@ -157,10 +167,11 @@ if __name__ == '__main__':
                     amazon_df = pd.DataFrame.from_dict(d)
                     amazon_df['title'].replace('', np.nan, inplace=True)
                     amazon_df = amazon_df.dropna(subset=['title'])
-                    amazon_df.insert(0, "Address", addres, True)
+                    amazon_df.insert(0, "Address", addres+product, True)
                 data = pd.concat([data,amazon_df], ignore_index=True, sort=False)
             except:
                 pass     
-        print(data)    
-        data.to_csv("amazon_data_PS5.csv", header=True, mode="w", index=False)
+        print(data)  
+        data.to_csv("amazon_data.csv", header=True, mode="a", index=False)       
+        
     
