@@ -117,13 +117,15 @@ if __name__ == '__main__':
     "Apple Watch Series 9","Apple Watch Ultra 2","Gameboy","Ipad Pro","Iphone 14 Pro Max","Iphone 15 Pro Max","Mackbook Pro",
     "Mega Drive","Nintendo Switch","Ps4","Ps5","Airpods Max","Psp","Xbox Series X","Product"}
     
+    #products = {"Airpods Pro"}
+    
     address = {
     "https://www.amazon.ca/s?k=",
     "https://www.amazon.fr/s?k=",
     "https://www.amazon.de/s?k=",
     "https://www.amazon.co.jp/s?k=",
     "https://www.amazon.co.uk/s?k="
-    }
+    }  
     
     for product in products:
         print("---------------->"+product)
@@ -167,11 +169,10 @@ if __name__ == '__main__':
                     amazon_df = pd.DataFrame.from_dict(d)
                     amazon_df['title'].replace('', np.nan, inplace=True)
                     amazon_df = amazon_df.dropna(subset=['title'])
-                    amazon_df.insert(0, "Address", addres+product, True)
-                data = pd.concat([data,amazon_df], ignore_index=True, sort=False)
+                    amazon_df.insert(0, "address", addres+product, True)
+                    amazon_df=amazon_df[amazon_df["address"].str.contains(product)]
+                print(amazon_df)
+                amazon_df.to_csv("amazon_data.csv", header=True, mode="a", index=False)       
             except:
                 pass     
-        print(data)  
-        data.to_csv("amazon_data.csv", header=True, mode="a", index=False)       
-        
-    
+        #print(data)  
