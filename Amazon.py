@@ -106,8 +106,8 @@ def clear_file(file_in):
         file_to_delete.close()
     except:
         pass
-    
-if __name__ == '__main__':
+
+def fetch_all():
     data = pd.DataFrame()
     clear_file("amazon_data.csv")
     # add your user agent 
@@ -170,9 +170,20 @@ if __name__ == '__main__':
                     amazon_df['title'].replace('', np.nan, inplace=True)
                     amazon_df = amazon_df.dropna(subset=['title'])
                     amazon_df.insert(0, "address", addres+product, True)
+                    amazon_df2 = amazon_df
                     amazon_df=amazon_df[amazon_df["address"].str.contains(product)]
+                    amazon_df = amazon_df[amazon_df["address"].str.contains("<") == False]
+                    amazon_df = amazon_df[amazon_df["title"].str.contains("<") == False]
+                    amazon_df = amazon_df[amazon_df["price"].str.contains("<") == False]
+                    amazon_df = amazon_df[amazon_df["rating"].str.contains("<") == False]
+                    amazon_df = amazon_df[amazon_df["reviews"].str.contains("<") == False]
+                    amazon_df = amazon_df[amazon_df["availability"].str.contains("<") == False]
                 print(amazon_df)
-                amazon_df.to_csv("amazon_data.csv", header=True, mode="a", index=False)       
+                amazon_df.to_csv("amazon_data.csv", header=True, mode="a", index=False)
+                #amazon_df2.to_csv("amazon_data2.csv", header=True, mode="a", index=False)
             except:
                 pass     
         #print(data)  
+    
+if __name__ == '__main__':
+    fetch_all()
