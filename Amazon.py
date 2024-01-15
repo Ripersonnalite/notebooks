@@ -1,3 +1,4 @@
+"""By Ricardo Kazuo"""
 from bs4 import BeautifulSoup
 import requests
 import pandas as pd
@@ -100,7 +101,6 @@ def get_availability(soup):
     return available
 
 def clear_file(file_in):
-    """By Ricardo Kazuo"""
     try:
         file_to_delete = open(file_in,'w')
         file_to_delete.close()
