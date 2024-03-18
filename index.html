@@ -1,0 +1,47 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+    <title>Flask-SocketIO BTC</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.5.1/jquery.min.js" integrity="sha512-bLT0Qm9VnAYZDflyKcBaQ2gg0hSYNQrJ8RilYldYQ1FxQYoCLtUjuuRuZo+fjqhx/qtq/1itJ0C2ejDxltZVFg==" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/3.0.4/socket.io.js" integrity="sha512-aMGMvNYu8Ue4G+fHa359jcPb1u+ytAF+P2SCb+PxrjCdO3n3ZTxJ30zuH39rimUggmTwmh2u7wvQsDTHESnmfQ==" crossorigin="anonymous"></script>
+	
+	<script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.5.0/Chart.min.js"></script>
+    
+	<script type="text/javascript" charset="utf-8">
+        $(document).ready(function() {
+
+            var socket = io();
+
+            socket.on('my_response', function(msg, cb) {
+                $('#log').append('<br>' + $('<div/>').text('\n' + msg.data).html());
+                if (cb)
+                    cb();
+            });
+            socket.on('my_response2', function(msg, cb) {
+                $('#log2').append('<br>' + $('<div/>').text('\n' + msg.data).html());
+                if (cb)
+                    cb();
+            });
+        });
+		
+		window.setInterval(function() {
+			var elem = document.getElementById('log');
+			elem.scrollTop = elem.scrollHeight;
+		}, 5000);
+		window.setInterval(function() {
+			var elem = document.getElementById('log2');
+			elem.scrollTop = elem.scrollHeight;
+		}, 5000);
+    </script>
+</head>
+<body>
+	<h1>Live Data via api.coinbase.com</h1>
+	<textarea id="log" rows="1" cols="50" style="font-size: 12pt"></textarea>
+	<br>
+	<textarea id="log2" rows="1" cols="50" style="font-size: 12pt"></textarea>
+	<br>
+	<h3>Flask-Socket IOAsync mode is: {{ async_mode }}</h3>
+	<h3>Bought by Ricardo & Flask & Coinbase</h3>
+	
+</body>
+</html>
