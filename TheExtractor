@@ -1,0 +1,60 @@
+import smtplib, time, datetime, inspect
+from time import sleep
+from email.mime.text import MIMEText
+
+# Main data processing code
+df = spark.sql("""
+SELECT 
+    a.Date, a.Ticker, a.Open, a.High, a.Low, a.Close, a.Volume, a.Dividends, a.Stock_Splits, a.Index, a.Company_Name, a.Adj_Close,
+    b.Date AS Date_2, b.Ticker AS Ticker_2, b.Open AS Open_2, b.High AS High_2, b.Low AS Low_2, b.Close AS Close_2, 
+    b.Volume AS Volume_2, b.Dividends AS Dividends_2, b.Stock_Splits AS Stock_Splits_2, b.Index AS Index_2, 
+    b.Company_Name AS Company_Name_2, b.Adj_Close AS Adj_Close_2,
+    c.Date AS Date_3, c.Ticker AS Ticker_3, c.Open AS Open_3, c.High AS High_3, c.Low AS Low_3, c.Close AS Close_3,
+    c.Volume AS Volume_3, c.Dividends AS Dividends_3, c.Stock_Splits AS Stock_Splits_3, c.Index AS Index_3,
+    c.Company_Name AS Company_Name_3, c.Adj_Close AS Adj_Close_3,
+    d.Date AS Date_4, d.Ticker AS Ticker_4, d.Open AS Open_4, d.High AS High_4, d.Low AS Low_4, d.Close AS Close_4,
+    d.Volume AS Volume_4, d.Dividends AS Dividends_4, d.Stock_Splits AS Stock_Splits_4, d.Index AS Index_4,
+    d.Company_Name AS Company_Name_4, d.Adj_Close AS Adj_Close_4,
+    e.Date AS Date_5, e.Ticker AS Ticker_5, e.Open AS Open_5, e.High AS High_5, e.Low AS Low_5, e.Close AS Close_5,
+    e.Volume AS Volume_5, e.Dividends AS Dividends_5, e.Stock_Splits AS Stock_Splits_5, e.Index AS Index_5,
+    e.Company_Name AS Company_Name_5, e.Adj_Close AS Adj_Close_5
+FROM workspace.default.combined_financial_stocks a 
+JOIN workspace.default.combined_financial_stocks b ON a.Date = b.Date 
+JOIN workspace.default.combined_financial_stocks c ON a.Date = c.Date 
+JOIN workspace.default.combined_financial_stocks d ON a.Date = d.Date 
+JOIN workspace.default.combined_financial_stocks e ON a.Date = e.Date 
+LIMIT 10000000
+""")
+
+# Get data profile before writing
+num_rows = df.count()
+num_columns = len(df.columns)
+# Estimate uncompressed file size
+estimated_size_bytes = num_rows * num_columns * 10
+estimated_size_mb = round(estimated_size_bytes / (1024 * 1024), 2)
+# Estimate compressed size (roughly 10-20% of original with gzip)
+estimated_compressed_size_mb = round(estimated_size_mb * 0.15, 2)
+
+# Write with compression
+df.coalesce(1).write.format("csv") \
+    .option("header", "true") \
+    .option("compression", "gzip") \
+    .mode("overwrite") \
+    .save("/Volumes/workspace/default/data/financial_export_wide.csv.gz")
+
+# End timing and send completion notification with data profile
+end_time = time.time()
+formatted_end_time = datetime.datetime.fromtimestamp(end_time).strftime('%Y-%m-%d %H:%M:%S')
+execution_time = round(end_time - start_time, 2)
+
+report = f"""
+Data Export Summary:
+-------------------
+Number of Rows: {num_rows:,}
+Number of Columns: {num_columns}
+Estimated Original Size: {estimated_size_mb} MB
+Estimated Compressed Size: {estimated_compressed_size_mb} MB
+Compression Ratio: {round(estimated_size_mb/estimated_compressed_size_mb, 2)}:1
+Execution Time: {execution_time} seconds
+Location: /Volumes/workspace/default/data/financial_export_wide.csv.gz
+"""
