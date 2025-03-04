@@ -26,7 +26,21 @@ sudo apt update && sudo apt upgrade -y
 
 # Install required dependencies
 echo "Installing required dependencies..."
-sudo apt install -y wget openjdk-11-jdk openjdk-11-jre python3-pip python3-venv python3-dev postgresql postgresql-contrib libpq-dev openssh-server openssh-client
+sudo apt install -y wget openjdk-11-jdk openjdk-11-jre python3-pip python3-venv python3-dev python3-full postgresql postgresql-contrib libpq-dev openssh-server openssh-client
+
+# Create Python Virtual Environment first (to avoid externally managed environment error)
+echo "Creating Python virtual environment..."
+PYTHON_CMD="python3"
+echo "Checking Python version..."
+PY_VERSION=$(python3 --version)
+echo "Using $PY_VERSION"
+
+$PYTHON_CMD -m venv ~/spark_env
+source ~/spark_env/bin/activate
+
+# Now install gdown inside the virtual environment
+echo "Installing gdown inside virtual environment..."
+pip install gdown imblearn nltk
 
 # Set JAVA_HOME explicitly for the current script
 export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
@@ -63,16 +77,8 @@ ssh -o StrictHostKeyChecking=no localhost "echo SSH to localhost successful" || 
     sleep 3
 }
 
-# Find available Python version
-PYTHON_CMD="python3"
-echo "Checking Python version..."
-PY_VERSION=$(python3 --version)
-echo "Using $PY_VERSION"
-
-# Create Python Virtual Environment
-echo "Creating Python virtual environment..."
-$PYTHON_CMD -m venv ~/spark_env
-source ~/spark_env/bin/activate
+# We already created and activated the virtual environment earlier
+echo "Using Python virtual environment at ~/spark_env"
 
 # Install PySpark & Other Python Libraries
 echo "Installing Python libraries..."
@@ -87,7 +93,7 @@ pip install pyarrow plotly
 
 # Install data science packages
 echo "Installing data science packages..."
-pip install pandas numpy matplotlib seaborn scikit-learn
+pip install pandas numpy matplotlib seaborn scikit-learn streamlit_option_menu
 
 # Install notebook support
 echo "Installing Jupyter support..."
@@ -105,8 +111,8 @@ pip install dagster dagit dagster-postgres
 echo "Installing database adapters..."
 pip install psycopg2-binary
 
-# Install gdown for file downloads
-echo "Installing gdown..."
+# Install gdown for file downloads (ensure it's installed again after venv activation)
+echo "Installing gdown in virtual environment..."
 pip install gdown
 
 # Set up PostgreSQL for Hive metastore
@@ -147,9 +153,9 @@ sudo -u postgres psql -d metastore -c "ALTER USER hiveuser WITH SUPERUSER;"
 # Verify PostgreSQL setup
 echo "Verifying PostgreSQL setup..."
 if sudo -u postgres psql -c "SELECT 1 FROM pg_database WHERE datname='metastore'" | grep -q 1; then
-    echo "✓ PostgreSQL metastore database created successfully"
+    echo "âœ“ PostgreSQL metastore database created successfully"
 else
-    echo "✗ Failed to create metastore database"
+    echo "âœ— Failed to create metastore database"
     exit 1
 fi
 
@@ -159,15 +165,11 @@ if [ -d "$HOME/hadoop" ]; then
     echo "Hadoop directory already exists, skipping download."
     HADOOP_HOME="$HOME/hadoop"
 else
-    echo "Downloading and installing Hadoop..."
+    echo "Downloading and installing Hadoop from Google Drive..."
     cd "$DOWNLOAD_DIR"
     
-    # Check if we already have the file
-    if [ ! -f "hadoop-3.3.6.tar.gz" ]; then
-        wget https://archive.apache.org/dist/hadoop/common/hadoop-3.3.6/hadoop-3.3.6.tar.gz
-    else
-        echo "Using existing Hadoop download."
-    fi
+    # Download from Google Drive instead of Apache mirrors
+    gdown 1-iagXKcm3iOy85jJ7d8h39NbhvyqJUCj -O hadoop-3.3.6.tar.gz
     
     tar -xzf hadoop-3.3.6.tar.gz -C "$HOME"
     mv "$HOME/hadoop-3.3.6" "$HOME/hadoop"
@@ -184,15 +186,11 @@ if [ -d "$HOME/hive" ]; then
     echo "Hive directory already exists, skipping download."
     HIVE_HOME="$HOME/hive"
 else
-    echo "Downloading and installing Hive..."
+    echo "Downloading and installing Hive from Google Drive..."
     cd "$DOWNLOAD_DIR"
     
-    # Check if we already have the file
-    if [ ! -f "apache-hive-3.1.3-bin.tar.gz" ]; then
-        wget https://archive.apache.org/dist/hive/hive-3.1.3/apache-hive-3.1.3-bin.tar.gz
-    else
-        echo "Using existing Hive download."
-    fi
+    # Download from Google Drive instead of Apache mirrors
+    gdown 1-f1xiY-qztO055oOo34wHR71nra35O5S -O apache-hive-3.1.3-bin.tar.gz
     
     tar -xzf apache-hive-3.1.3-bin.tar.gz -C "$HOME"
     mv "$HOME/apache-hive-3.1.3-bin" "$HOME/hive"
@@ -208,15 +206,11 @@ echo "Checking for PostgreSQL JDBC Driver..."
 if [ -f "$HIVE_HOME/lib/postgresql-42.6.0.jar" ]; then
     echo "PostgreSQL JDBC driver already exists in Hive lib directory."
 else
-    echo "Downloading PostgreSQL JDBC Driver..."
+    echo "Downloading PostgreSQL JDBC Driver from Google Drive..."
     cd "$DOWNLOAD_DIR"
     
-    # Check if we already have the file
-    if [ ! -f "postgresql-42.6.0.jar" ]; then
-        wget https://jdbc.postgresql.org/download/postgresql-42.6.0.jar
-    else
-        echo "Using existing PostgreSQL JDBC driver download."
-    fi
+    # Download from Google Drive instead of PostgreSQL website
+    gdown 1-e1qMIpCOOAfkF7g2IUcNht2w4kjIUR6 -O postgresql-42.6.0.jar
     
     cp postgresql-42.6.0.jar "$HIVE_HOME/lib/"
 fi
@@ -428,9 +422,9 @@ sudo systemctl start hive-metastore
 # Check if the service is running
 echo "Checking Hive Metastore service status..."
 if sudo systemctl is-active --quiet hive-metastore; then
-    echo "✓ Hive Metastore service is running"
+    echo "âœ“ Hive Metastore service is running"
 else
-    echo "⚠️ Warning: Hive Metastore service failed to start. Check logs with: sudo journalctl -u hive-metastore"
+    echo "âš ï¸ Warning: Hive Metastore service failed to start. Check logs with: sudo journalctl -u hive-metastore"
     # Start it manually for now to complete the setup
     echo "Starting Hive Metastore manually for current session..."
     "$HIVE_HOME/bin/hive" --service metastore &
@@ -548,71 +542,73 @@ echo "Verifying installation..."
 
 # Check Python and PySpark
 if python -c "import pyspark" 2>/dev/null; then
-    echo "✓ PySpark is installed correctly"
+    echo "Ok - PySpark is installed correctly"
 else
-    echo "✗ PySpark installation failed"
+    echo "âœ— PySpark installation failed"
     SETUP_SUCCESS=false
 fi
 
 # Check Java
 if java -version 2>&1 | grep -q "version \"11"; then
-    echo "✓ Java 11 is installed correctly"
+    echo "âœ“ Java 11 is installed correctly"
 else
-    echo "ℹ️ Java is installed but may not be version 11"
+    echo "â„¹ï¸ Java is installed but may not be version 11"
     java -version
 fi
 
 # Check Hadoop
 if [ -d "$HADOOP_HOME" ] && [ -x "$HADOOP_HOME/bin/hadoop" ]; then
-    echo "✓ Hadoop is installed correctly"
+    echo "âœ“ Hadoop is installed correctly"
 else
-    echo "✗ Hadoop installation failed"
+    echo "âœ— Hadoop installation failed"
     SETUP_SUCCESS=false
 fi
 
 # Check Hive
 if [ -d "$HIVE_HOME" ] && [ -x "$HIVE_HOME/bin/hive" ]; then
-    echo "✓ Hive is installed correctly"
+    echo "âœ“ Hive is installed correctly"
 else
-    echo "✗ Hive installation failed"
+    echo "âœ— Hive installation failed"
     SETUP_SUCCESS=false
 fi
 
 # Check PostgreSQL
 if systemctl is-active --quiet postgresql; then
-    echo "✓ PostgreSQL is running"
+    echo "âœ“ PostgreSQL is running"
 else
-    echo "✗ PostgreSQL is not running"
+    echo "âœ— PostgreSQL is not running"
     SETUP_SUCCESS=false
 fi
 
 # Check Hive Metastore Service
 if systemctl is-active --quiet hive-metastore; then
-    echo "✓ Hive Metastore service is running via systemd"
+    echo "âœ“ Hive Metastore service is running via systemd"
 elif ps -ef | grep -v grep | grep "hive.*metastore" > /dev/null; then
-    echo "✓ Hive Metastore is running (manual process)"
+    echo "âœ“ Hive Metastore is running (manual process)"
 else
-    echo "✗ Hive Metastore is not running"
+    echo "âœ— Hive Metastore is not running"
     SETUP_SUCCESS=false
 fi
 
 echo ""
 if [ "$SETUP_SUCCESS" = true ]; then
     echo "==========================================="
-    echo "✅ Installation and configuration complete!"
+    echo "âœ… Installation and configuration complete!"
     echo "==========================================="
 else
     echo "=================================================="
-    echo "⚠️  Installation completed with some issues"
+    echo "âš ï¸  Installation completed with some issues"
     echo "=================================================="
 fi
 
+# Keep the existing gdown commands that are already there
 gdown 1-6v1o4x1PtoJFs53AtTHCme5nLmGLee4 -O ~/ 
 gdown 1-DnV98yFEG_ON_HvidhKIYDXAYg-v6v2 -O ~/
 gdown 1-4eJ9ONGmKn45jT8S7FKJU_QYvqq_Axb -O ~/
 gdown 1bpuW3eeGnqJS5_xJf4jHDudYQTFDLW0I -O ~/
 gdown 1-LdMZJFFAKb2hEzmWK2G4F8Si05V8oFK -O ~/
 gdown 1-Epz_Jdij6tf8z5A9ZykNMgqOOQqSD_A -O ~/dagster_project/spark_dagster.py
+
 echo ""
 echo "To test the installation, run:"
 echo "source ~/.bashrc"
@@ -635,3 +631,9 @@ echo "  - View logs with: sudo journalctl -u hive-metastore"
 echo ""
 echo "Enjoy your Spark and Hive setup with PostgreSQL metastore!"
 #source ~/spark_env/bin/activate
+#dagit -f ~/dagster_project/spark_dagster.py -h 0.0.0.0 -p 3030
+#mkdir -p ~/.streamlit
+#nano ~/.streamlit/credentials.toml
+#echo -e "[server]\nheadless = true" > ~/.streamlit/config.toml
+#sudo -u postgres psql -d metastore -c "SELECT * FROM \"DBS\";"
+#sudo -u postgres psql -d metastore -c "SELECT * FROM \"TBLS\" WHERE \"DB_ID\" IN (SELECT \"DB_ID\" FROM \"DBS\" WHERE \"NAME\"='stocks_db');"
