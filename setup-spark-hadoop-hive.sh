@@ -84,6 +84,8 @@ echo "Using Python virtual environment at ~/spark_env"
 echo "Installing Python libraries..."
 # Install pip build dependencies
 pip install wheel setuptools
+pip cache purge
+
 
 # Install core packages first
 echo "Installing core Python packages..."
