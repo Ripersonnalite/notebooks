@@ -602,6 +602,7 @@ else
     echo "âš ï¸  Installation completed with some issues"
     echo "=================================================="
 fi
+find . -name "*.pyc" -exec rm -f {} \;
 
 # Keep the existing gdown commands that are already there
 gdown 1-6v1o4x1PtoJFs53AtTHCme5nLmGLee4 -O ~/ 
