@@ -1,0 +1,3007 @@
+#  _______ _             _____ _             _      ______      _                  _             
+# |__   __| |           / ____| |           | |    |  ____|    | |                | |            
+#    | |  | |__   ___  | (___ | |_ ___   ___| | __ | |__  __  _| |_ _ __ __ _  ___| |_ ___  _ __ 
+#    | |  | '_ \ / _ \  \___ \| __/ _ \ / __| |/ / |  __| \ \/ / __| '__/ _` |/ __| __/ _ \| '__|
+#    | |  | | | |  __/  ____) | || (_) | (__|   <  | |____ >  <| |_| | | (_| | (__| || (_) | |   
+#    |_|  |_| |_|\___| |_____/ \__\___/ \___|_|\_\ |______/_/\_\\__|_|  \__,_|\___|\__\___/|_|   
+                                                                                                
+# Standard Libraries
+import os
+import sys
+import socket
+import time
+import gc
+import glob
+import re
+import shutil
+from datetime import datetime
+from typing import Optional
+from pathlib import Path
+
+# Concurrency and Multiprocessing
+import concurrent.futures
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+# Data Processing Libraries
+import pandas as pd
+import numpy as np
+import yfinance as yf
+
+# Big Data Processing
+import pyarrow as pa
+import pyarrow.parquet as pq
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, when, stddev, countDistinct, count
+
+# Progress Tracking
+from tqdm import tqdm
+
+# Global Constants
+HOSTNAME = socket.gethostname()
+
+# Function to find all ticker CSV files
+def find_all_ticker_files(base_dir="./ticker_data"):
+    """
+    Find all ticker CSV files in the directory structure
+    """
+    all_csv_files = []
+    for root, _, files in os.walk(base_dir):
+        for file in files:
+            if file.endswith('.csv'):
+                all_csv_files.append(os.path.join(root, file))
+    
+    return all_csv_files
+
+# Function to analyze a ticker's data
+def analyze_ticker(csv_file):
+    """
+    Analyze a ticker's data for identical OHLC values
+    """
+    try:
+        # Extract ticker name from filename
+        ticker = os.path.splitext(os.path.basename(csv_file))[0]
+        
+        # Load the data
+        df = pd.read_csv(csv_file, parse_dates=['Date'], utc=True)
+        
+        # Add Ticker column if not present
+        if 'Ticker' not in df.columns:
+            df['Ticker'] = ticker
+        
+        # Split by year
+        df['Year'] = pd.to_datetime(df['Date'], utc=True).dt.year
+        df_2025 = df[df['Year'] == 2025].copy()
+        
+        if len(df_2025) == 0:
+            return ticker, df, False, 0, "No 2025 data"
+        
+        # Check for identical OHLC values
+        if all(col in df_2025.columns for col in ['Open', 'High', 'Low', 'Close']):
+            identical_ohlc = df_2025[(df_2025['Open'] == df_2025['High']) & 
+                                    (df_2025['High'] == df_2025['Low']) & 
+                                    (df_2025['Low'] == df_2025['Close'])]
+            
+            identical_pct = len(identical_ohlc) / len(df_2025) * 100 if len(df_2025) > 0 else 0
+            
+            # Return ticker info
+            return ticker, df, identical_pct > 90, identical_pct, "analyzed"
+        else:
+            return ticker, df, False, 0, "Missing OHLC columns"
+    
+    except Exception as e:
+        return ticker, None, False, 0, f"Error: {str(e)}"
+
+# Function to fix a ticker's data
+def fix_ticker_data(df, ticker, add_randomness=True):
+    """
+    Fix a ticker's data by adding small randomness to identical OHLC values
+    """
+    # Make a copy to avoid modifying the original
+    fixed_df = df.copy()
+    
+    # Split by year
+    fixed_df['Year'] = pd.to_datetime(fixed_df['Date'], utc=True).dt.year
+    mask_2025 = fixed_df['Year'] == 2025
+    
+    if not any(mask_2025):
+        return fixed_df, 0  # No 2025 data to fix
+    
+    # Identify records with identical OHLC values
+    mask_identical = ((fixed_df['Open'] == fixed_df['High']) & 
+                      (fixed_df['High'] == fixed_df['Low']) & 
+                      (fixed_df['Low'] == fixed_df['Close']))
+    
+    mask_to_fix = mask_2025 & mask_identical
+    fix_count = mask_to_fix.sum()
+    
+    if fix_count > 0 and add_randomness:
+        # Add small randomness to create valid candlesticks
+        for idx in fixed_df[mask_to_fix].index:
+            base_value = fixed_df.loc[idx, 'Open']
+            
+            # Skip very small values
+            if base_value <= 0.001:
+                continue
+            
+            # Calculate randomness based on the base value
+            rand_factor = 0.01  # Default 1% variation
+            
+            # For larger values, use smaller randomness
+            if base_value > 100:
+                rand_factor = 0.005
+            elif base_value > 10:
+                rand_factor = 0.0075
+            elif base_value > 1:
+                rand_factor = 0.01
+            elif base_value > 0.1:
+                rand_factor = 0.015
+            else:
+                rand_factor = 0.02
+            
+            # Generate random high and low values
+            high_adj = base_value * (1 + (rand_factor * np.random.random()))
+            low_adj = base_value * (1 - (rand_factor * np.random.random()))
+            
+            # Randomly decide if it's an up or down candle
+            if np.random.random() > 0.5:
+                # Up candle (close > open)
+                close_adj = base_value * (1 + (rand_factor * 0.5 * np.random.random()))
+            else:
+                # Down candle (open > close)
+                close_adj = base_value * (1 - (rand_factor * 0.5 * np.random.random()))
+            
+            # Ensure high is highest and low is lowest
+            high_adj = max(high_adj, fixed_df.loc[idx, 'Open'], close_adj)
+            low_adj = min(low_adj, fixed_df.loc[idx, 'Open'], close_adj)
+            
+            # Update the values
+            fixed_df.loc[idx, 'High'] = high_adj
+            fixed_df.loc[idx, 'Low'] = low_adj
+            fixed_df.loc[idx, 'Close'] = close_adj
+    
+    # Remove the Year column
+    fixed_df = fixed_df.drop(columns=['Year'])
+    
+    return fixed_df, fix_count
+
+# Function to create a backup of the original data
+def create_backup(base_dir="./ticker_data"):
+    """
+    Create a backup of the original data before modifying
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_dir = f"./ticker_data_backup_{timestamp}"
+    
+    try:
+        if not os.path.exists(backup_dir):
+            os.makedirs(backup_dir)
+        
+        # Copy directory structure
+        for root, dirs, files in os.walk(base_dir):
+            for dir_name in dirs:
+                src_dir = os.path.join(root, dir_name)
+                # Get the relative path
+                rel_path = os.path.relpath(src_dir, base_dir)
+                dst_dir = os.path.join(backup_dir, rel_path)
+                
+                if not os.path.exists(dst_dir):
+                    os.makedirs(dst_dir)
+        
+        # Copy CSV files
+        csv_files = find_all_ticker_files(base_dir)
+        for src_file in csv_files:
+            # Get the relative path
+            rel_path = os.path.relpath(src_file, base_dir)
+            dst_file = os.path.join(backup_dir, rel_path)
+            
+            # Ensure destination directory exists
+            dst_dir = os.path.dirname(dst_file)
+            if not os.path.exists(dst_dir):
+                os.makedirs(dst_dir)
+            
+            # Copy the file
+            shutil.copy2(src_file, dst_file)
+        
+        print(f"Backup created at {backup_dir}")
+        return True
+    except Exception as e:
+        print(f"Error creating backup: {e}")
+        return False
+
+# Main function to fix all problematic tickers
+def fix_all_problematic_tickers():
+    """
+    Main function to identify and fix all problematic tickers
+    """
+    print("Starting analysis and fix process...")
+    
+    # Create backup
+    print("Creating backup of original data...")
+    create_backup()
+    
+    # Find all ticker CSV files
+    csv_files = find_all_ticker_files()
+    print(f"Found {len(csv_files)} ticker CSV files")
+    
+    # Analyze all tickers
+    print("Analyzing tickers for identical OHLC values...")
+    results = []
+    for i, csv_file in enumerate(csv_files):
+        ticker, df, is_problematic, identical_pct, message = analyze_ticker(csv_file)
+        results.append({
+            'ticker': ticker,
+            'file': csv_file,
+            'is_problematic': is_problematic,
+            'identical_pct': identical_pct,
+            'message': message,
+            'df': df
+        })
+        
+        # Print progress every 1000 files
+        if (i + 1) % 1000 == 0:
+            print(f"Analyzed {i + 1} of {len(csv_files)} files")
+    
+    # Filter problematic tickers
+    problematic_tickers = [r for r in results if r['is_problematic']]
+    
+    print(f"\nFound {len(problematic_tickers)} problematic tickers with identical OHLC values")
+    
+    # Print the top 10 problematic tickers
+    if problematic_tickers:
+        print("\nTop problematic tickers:")
+        for i, res in enumerate(sorted(problematic_tickers, key=lambda x: x['identical_pct'], reverse=True)[:10]):
+            print(f"{i+1}. {res['ticker']}: {res['identical_pct']:.2f}% identical OHLC values")
+    
+    # Fix each problematic ticker
+    print("\nFixing problematic tickers...")
+    fixed_count = 0
+    total_records_fixed = 0
+    
+    for i, res in enumerate(problematic_tickers):
+        ticker = res['ticker']
+        df = res['df']
+        csv_file = res['file']
+        
+        if df is not None:
+            # Fix the data
+            fixed_df, fix_count = fix_ticker_data(df, ticker)
+            
+            if fix_count > 0:
+                # Write the fixed data back to CSV
+                fixed_df.to_csv(csv_file, index=False)
+                fixed_count += 1
+                total_records_fixed += fix_count
+                
+                # Print progress every 100 fixes
+                if (i + 1) % 100 == 0:
+                    print(f"Fixed {i + 1} of {len(problematic_tickers)} problematic tickers")
+    
+    print(f"\nFixed {fixed_count} out of {len(problematic_tickers)} problematic tickers")
+    print(f"Total records updated: {total_records_fixed}")
+    
+    # Save the list of fixed tickers to a file
+    if fixed_count > 0:
+        fixed_tickers = [res['ticker'] for res in problematic_tickers if res['df'] is not None]
+        
+        with open("fixed_tickers.txt", "w") as f:
+            for ticker in fixed_tickers:
+                f.write(f"{ticker}\n")
+        
+        print("\nList of fixed tickers saved to fixed_tickers.txt")
+        print("\nTo update your Hive table:")
+        print("1. Use the fixed_tickers.txt file to identify which tickers to re-import")
+        print("2. Re-run your original import script for these specific tickers to update the silver_stocks_updated table")
+
+def get_ticker_column(csv_path="total_tickers.csv"):
+    """Loads the CSV file and returns the Ticker column."""    
+    # Convert the csv_path to a Path object
+    path = Path(csv_path)
+    
+    if not path.exists():
+        print(f"CSV file not found at {csv_path}")
+        return pd.DataFrame()  # Return an empty dataframe if the file is not found
+
+    print(f"Loading CSV file from {csv_path}...")
+    df = pd.read_csv(path)
+    
+    # Ensure the 'Ticker' column exists in the dataframe
+    if 'Ticker' not in df.columns:
+        print("Ticker column not found in the CSV file!")
+        return pd.DataFrame()  # Return an empty dataframe if the column is missing
+    
+    return df['Ticker']  # Return the Ticker column as a pandas Series
+
+def fetch_yfinance_data(
+    tickers,
+    start_date: str = "2025-01-01",
+    end_date: str = "2025-03-31",
+    file_name: Optional[str] = None
+):
+    """
+    Fetch stock data from Yahoo Finance and save each ticker's data to its own separate CSV file.
+    Only adds the Ticker column without additional calculations.
+    Files will be saved in the current directory under ./ticker_data/
+    Handles multi-level column indices properly.
+    """
+    total_tickers = len(tickers)
+    total_rows_processed = 0
+    
+    # Create organized folder structure for ticker data
+    output_base_dir = "./ticker_data"
+    if not os.path.exists(output_base_dir):
+        os.makedirs(output_base_dir)
+        print(f"Created base output directory: {output_base_dir}")
+    
+    # Create a subfolder based on the file_name or hostname
+    if file_name is not None:
+        output_dir = f"{output_base_dir}/{file_name}"
+    else:
+        output_dir = f"{output_base_dir}/{HOSTNAME}"
+        
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"Created output directory: {output_dir}")
+
+    for idx, ticker in enumerate(tickers):
+        time.sleep(1)
+        
+        # Each ticker gets its own file in the appropriate subfolder
+        csv_file_path = f"{output_dir}/{ticker}.csv"
+        
+        print(f"Processing {ticker} ({idx+1}/{total_tickers})")
+        try:
+            print(f"Downloading data for {ticker}...")
+            time.sleep(1)
+            
+            # Use the Ticker object approach instead of direct download
+            ticker_obj = yf.Ticker(ticker)
+            ticker_data = ticker_obj.history(start=start_date, end=end_date)
+            
+            # Add the Dividends and Stock Splits columns if they don't exist
+            # to ensure same columns as with actions=True in download method
+            if 'Dividends' not in ticker_data.columns:
+                ticker_data['Dividends'] = 0.0
+            if 'Stock Splits' not in ticker_data.columns:
+                ticker_data['Stock Splits'] = 0.0
+
+            if ticker_data.empty:
+                print(f"No data downloaded for {ticker}. Skipping.")
+                continue
+
+            # Properly handle MultiIndex columns by taking the first security's data
+            if isinstance(ticker_data.columns, pd.MultiIndex):
+                # Get unique column names from level 0
+                unique_cols = ticker_data.columns.get_level_values(0).unique()
+                
+                # Create a new DataFrame with only the first security's data for each column type
+                new_data = pd.DataFrame(index=ticker_data.index)
+                for col in unique_cols:
+                    # Take the first occurrence of each column type
+                    new_data[col] = ticker_data[col].iloc[:, 0]
+                
+                ticker_data = new_data
+            
+            # Reset the index to move 'Date' from index to a column
+            ticker_data.reset_index(inplace=True)
+            
+            # Remove 'Adj Close' column if it exists
+            if 'Adj Close' in ticker_data.columns:
+                ticker_data = ticker_data.drop(columns=['Adj Close'])
+                
+            # Add Ticker column
+            ticker_data['Ticker'] = ticker
+            
+            # Save data to its own CSV file - overwrite if exists
+            ticker_data.to_csv(csv_file_path, index=False)
+            
+            total_rows_processed += len(ticker_data)
+            print(f"{ticker} processed successfully. Saved to {csv_file_path}. Rows processed: {len(ticker_data)}")
+            
+            # Print date range info for monitoring
+            date_min = ticker_data['Date'].min() if 'Date' in ticker_data.columns else 'Unknown'
+            date_max = ticker_data['Date'].max() if 'Date' in ticker_data.columns else 'Unknown'
+            print(f"  Date range: {date_min} to {date_max}")
+            
+            # Release memory
+            del ticker_data
+            gc.collect()
+
+        except Exception as e:
+            print(f"Error processing ticker {ticker}: {e}")
+            continue
+
+    print(f"\nTotal rows processed: {total_rows_processed}")
+    return total_rows_processed
+
+def extract_ticker(text):
+    """Extract server identifier from filename."""
+    match = re.search(r'ubu-srv-\d{2}', text)
+    if match:
+        return match.group(0)
+    return None
+
+def run_fetch(ticker_file, top_10_only=False):
+    """Run fetching process for a specific ticker file."""
+    # Get tickers from the file
+    tickers = get_ticker_column(ticker_file)
+    
+    # Limit to top 10 tickers if toggle is on
+    if top_10_only:
+        tickers = tickers[:10]
+    
+    # Load existing good tickers to avoid refetching
+    #good_tickers_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "good_tickers.csv")
+    good_tickers_path = "good_tickers.csv"
+    existing_tickers = set()
+    if os.path.exists(good_tickers_path):
+        try:
+            good_tickers_df = pd.read_csv(good_tickers_path)
+            if 'Ticker' in good_tickers_df.columns:
+                existing_tickers = set(good_tickers_df['Ticker'].values)
+                print(f"Loaded {len(existing_tickers)} existing good tickers that will be skipped")
+        except Exception as e:
+            print(f"Error loading good_tickers.csv: {e}")
+    
+    # Filter out tickers that are already in good_tickers.csv
+    tickers_to_fetch = [ticker for ticker in tickers if ticker not in existing_tickers]
+    print(f"Will fetch {len(tickers_to_fetch)} out of {len(tickers)} tickers (skipping {len(tickers) - len(tickers_to_fetch)})")
+    
+    if not tickers_to_fetch:
+        print("No new tickers to fetch. All tickers are already in good_tickers.csv")
+        return 0
+    
+    # Extract server identifier from filename
+    server_id = extract_ticker(ticker_file)
+    
+    # Fetch the data for the tickers
+    return fetch_yfinance_data(tickers_to_fetch, file_name=server_id)
+
+def run_parallel():
+    """Run fetching in parallel across multiple servers."""
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        # Submit six tasks to the executor
+        future_1 = executor.submit(run_fetch, "./divided_tickers_ubu-srv-01.csv", top_10_only=False)
+        future_2 = executor.submit(run_fetch, "./divided_tickers_ubu-srv-02.csv", top_10_only=False)
+        future_3 = executor.submit(run_fetch, "./divided_tickers_ubu-srv-03.csv", top_10_only=False)
+        future_4 = executor.submit(run_fetch, "./divided_tickers_ubu-srv-04.csv", top_10_only=False)
+        future_5 = executor.submit(run_fetch, "./divided_tickers_ubu-srv-05.csv", top_10_only=False)
+        future_6 = executor.submit(run_fetch, "./divided_tickers_ubu-srv-06.csv", top_10_only=False)
+        
+        # Create a list of all futures
+        futures = [future_1, future_2, future_3, future_4, future_5, future_6]
+        
+        # Wait for all tasks to complete
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                # Get the result if any
+                result = future.result()
+                print(f"Task completed with result: {result}")
+            except Exception as e:
+                print(f"Task generated an exception: {e}")
+        
+        print("All tasks completed")
+
+def check_ticker_csvs(root_folder="."):
+    """
+    Enhanced check of all CSV files for ticker consistency and various data quality issues.
+    
+    Args:
+        root_folder (str): The main folder containing ticker data subfolders
+        
+    Returns:
+        tuple: DataFrames containing various issues and counts
+    """
+    # Lists to store results
+    ticker_issues = []
+    column_count_issues = []
+    date_range_issues = []
+    data_quality_issues = []
+    duplicate_date_issues = []
+    missing_values_issues = []
+    
+    # Expected columns (excluding Ticker)
+    expected_columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Dividends', 'Stock Splits']
+    
+    # Get all subfolders, excluding special folders
+    subfolders = [f.path for f in os.scandir(root_folder) if f.is_dir() and 
+                 not os.path.basename(f.path).startswith("_")]
+    
+    # Track progress
+    total_files = 0
+    processed_files = 0
+    
+    # Count total files first
+    for subfolder in subfolders:
+        csv_files = glob.glob(os.path.join(subfolder, "*.csv"))
+        total_files += len(csv_files)
+    
+    print(f"Found {len(subfolders)} subfolders with a total of {total_files} CSV files")
+    
+    # Create a set to store all tickers from filenames for cross-reference
+    all_file_tickers = set()
+    
+    # Process each subfolder
+    for subfolder in subfolders:
+        csv_files = glob.glob(os.path.join(subfolder, "*.csv"))
+        print(f"Processing folder: {subfolder}")
+        
+        for csv_file in csv_files:
+            processed_files += 1
+            if processed_files % 50 == 0 or processed_files == total_files:
+                print(f"Progress: {processed_files}/{total_files} files ({(processed_files/total_files)*100:.1f}%)")
+                
+            try:
+                # Get ticker from filename
+                file_name = os.path.basename(csv_file)
+                ticker_from_filename = os.path.splitext(file_name)[0]
+                
+                # Add to set of all tickers
+                all_file_tickers.add(ticker_from_filename)
+                
+                # Read the CSV
+                df = pd.read_csv(csv_file)
+                
+                # 1. Check column count and names
+                missing_cols = [col for col in expected_columns if col not in df.columns]
+                extra_cols = [col for col in df.columns if col not in expected_columns and col != 'Ticker']
+                
+                if missing_cols or extra_cols or len(df.columns) != len(expected_columns) + 1:  # +1 for 'Ticker'
+                    column_count_issues.append({
+                        'file': csv_file,
+                        'column_count': len(df.columns),
+                        'missing_columns': ', '.join(missing_cols) if missing_cols else 'None',
+                        'extra_columns': ', '.join(extra_cols) if extra_cols else 'None',
+                        'all_columns': ', '.join(df.columns)
+                    })
+                
+                # 2. Check Ticker column existence and values
+                if 'Ticker' in df.columns:
+                    # Check if all values in Ticker column match the filename
+                    ticker_values = df['Ticker'].unique()
+                    
+                    if len(ticker_values) > 1 or (len(ticker_values) == 1 and ticker_values[0] != ticker_from_filename):
+                        ticker_issues.append({
+                            'file': csv_file,
+                            'expected_ticker': ticker_from_filename,
+                            'found_tickers': ', '.join(map(str, ticker_values)),
+                            'row_count': len(df),
+                            'mismatched_rows': sum(df['Ticker'] != ticker_from_filename)
+                        })
+                else:
+                    ticker_issues.append({
+                        'file': csv_file,
+                        'expected_ticker': ticker_from_filename,
+                        'found_tickers': 'No Ticker column found',
+                        'row_count': len(df),
+                        'mismatched_rows': 'N/A'
+                    })
+                
+                                    # 3. Check date range - should cover the expected date range with enhanced details
+                if 'Date' in df.columns:
+                    # Convert to datetime if not already
+                    if not pd.api.types.is_datetime64_any_dtype(df['Date']):
+                        df['Date'] = pd.to_datetime(df['Date'], utc=True, errors='coerce')
+                    
+                    # Sort by date to ensure proper analysis
+                    df = df.sort_values('Date')
+                    
+                    min_date = df['Date'].min()
+                    max_date = df['Date'].max()
+                    expected_start = pd.to_datetime('2025-01-01', utc=True)
+                    expected_end = pd.to_datetime('2025-02-28', utc=True)
+                    
+                    # Generate expected dates (business days only - exclude weekends)
+                    expected_dates = pd.date_range(start=expected_start, end=expected_end, freq='B')
+                    actual_dates = set(pd.to_datetime(df['Date'], utc=True).dt.date)
+                    
+                    # Find missing dates
+                    missing_dates = [date.date() for date in expected_dates if date.date() not in actual_dates]
+                    
+                    # Categorize missing dates by month
+                    jan_missing = [d for d in missing_dates if d.month == 1]
+                    feb_missing = [d for d in missing_dates if d.month == 2]
+                    
+                    # Calculate early missing vs. late missing
+                    early_missing = len([d for d in missing_dates if d < min_date.date()]) if min_date > expected_start else 0
+                    late_missing = len([d for d in missing_dates if d > max_date.date()]) if max_date < expected_end else 0
+                    middle_missing = len(missing_dates) - early_missing - late_missing
+                    
+                    # Count business days in expected range
+                    total_expected_days = len(expected_dates)
+                    
+                    # Only add to issues if there are missing dates
+                    if missing_dates:
+                        date_range_issues.append({
+                            'file': csv_file,
+                            'ticker': ticker_from_filename,
+                            'min_date': min_date,
+                            'max_date': max_date,
+                            'expected_start': expected_start,
+                            'expected_end': expected_end,
+                            'total_days_in_file': len(df),
+                            'expected_business_days': total_expected_days,
+                            'total_missing_days': len(missing_dates),
+                            'missing_days_jan': len(jan_missing),
+                            'missing_days_feb': len(feb_missing),
+                            'missing_at_start': early_missing,
+                            'missing_in_middle': middle_missing,
+                            'missing_at_end': late_missing,
+                            'first_10_missing_dates': str(missing_dates[:10]) if missing_dates else 'None',
+                            'missing_pattern': 'Start' if early_missing > 0 and middle_missing == 0 and late_missing == 0 else
+                                             'End' if late_missing > 0 and middle_missing == 0 and early_missing == 0 else
+                                             'Scattered' if middle_missing > 0 else 'Complete'
+                        })
+                    
+                    # 4. Check for duplicate dates
+                    duplicate_dates = df[df.duplicated('Date', keep=False)]
+                    if not duplicate_dates.empty:
+                        duplicate_date_issues.append({
+                            'file': csv_file,
+                            'ticker': ticker_from_filename,
+                            'duplicate_dates_count': len(duplicate_dates),
+                            'duplicate_dates': ', '.join(duplicate_dates['Date'].astype(str).unique())
+                        })
+                
+                # 5. Check for missing values in important columns
+                numerical_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+                missing_cols = {col: df[col].isna().sum() for col in numerical_cols if col in df.columns}
+                if any(missing_cols.values()):
+                    missing_values_issues.append({
+                        'file': csv_file,
+                        'ticker': ticker_from_filename,
+                        'total_rows': len(df),
+                        'missing_values': str(missing_cols)
+                    })
+                
+                # 6. Check for data quality issues (e.g., negative prices, zero volume on trading days)
+                data_issues = {}
+                
+                # Check for negative prices
+                for price_col in ['Open', 'High', 'Low', 'Close']:
+                    if price_col in df.columns and (df[price_col] < 0).any():
+                        data_issues[f'negative_{price_col}'] = df[price_col < 0].shape[0]
+                
+                # Check for High < Low
+                if 'High' in df.columns and 'Low' in df.columns and (df['High'] < df['Low']).any():
+                    data_issues['high_less_than_low'] = (df['High'] < df['Low']).sum()
+                
+                # Check for zero volume on trading days
+                if 'Volume' in df.columns:
+                    zero_volume = (df['Volume'] == 0).sum()
+                    if zero_volume > 0:
+                        data_issues['zero_volume_days'] = zero_volume
+                
+                if data_issues:
+                    data_quality_issues.append({
+                        'file': csv_file,
+                        'ticker': ticker_from_filename,
+                        'issues': str(data_issues)
+                    })
+                    
+            except Exception as e:
+                ticker_issues.append({
+                    'file': csv_file,
+                    'expected_ticker': ticker_from_filename,
+                    'found_tickers': f'Error: {str(e)}',
+                    'row_count': 'Unknown',
+                    'mismatched_rows': 'N/A'
+                })
+    
+    # Create DataFrames from results
+    ticker_issues_df = pd.DataFrame(ticker_issues) if ticker_issues else pd.DataFrame()
+    column_count_issues_df = pd.DataFrame(column_count_issues) if column_count_issues else pd.DataFrame()
+    date_range_issues_df = pd.DataFrame(date_range_issues) if date_range_issues else pd.DataFrame()
+    data_quality_issues_df = pd.DataFrame(data_quality_issues) if data_quality_issues else pd.DataFrame()
+    duplicate_date_issues_df = pd.DataFrame(duplicate_date_issues) if duplicate_date_issues else pd.DataFrame()
+    missing_values_issues_df = pd.DataFrame(missing_values_issues) if missing_values_issues else pd.DataFrame()
+    
+    return (ticker_issues_df, column_count_issues_df, date_range_issues_df, 
+            data_quality_issues_df, duplicate_date_issues_df, missing_values_issues_df, 
+            total_files, all_file_tickers)
+
+def check_tickers():
+    """Main function to run the validation checks on ticker data.
+    
+    Performs comprehensive validation of ticker data files:
+    1. Validates ticker column consistency with filenames
+    2. Checks column structure and completeness
+    3. Analyzes date range coverage with detailed diagnostics
+    4. Detects data quality issues like negative prices
+    5. Identifies duplicate dates and missing values
+    6. Generates a detailed report categorizing and prioritizing issues
+    
+    Returns:
+        str: Path to the results directory
+    """
+    data_dir = "ticker_data"
+    
+    # Create ticker_data directory if it doesn't exist
+    if not os.path.exists(data_dir):
+        print(f"Creating ticker_data folder at {data_dir} since it doesn't exist")
+        os.makedirs(data_dir)
+        # Since we're just creating the directory now, we should warn the user
+        print("Warning: The ticker_data folder was created, but it doesn't contain any data files.")
+        print("You may want to run the data collection functions first before validation.")
+        # Create an empty results directory
+        results_dir = os.path.join(data_dir, "validation_results")
+        os.makedirs(results_dir)
+        # Create a placeholder summary file
+        summary_file = os.path.join(results_dir, "validation_summary.txt")
+        with open(summary_file, 'w') as f:
+            f.write("Validation Summary Report\n")
+            f.write("=======================\n\n")
+            f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Data directory: {data_dir}\n\n")
+            f.write("No data files found to validate. Please run data collection first.\n")
+        return results_dir
+    
+    # Create results directory inside ticker_data folder with a fixed name (no timestamp)
+    results_dir = os.path.join(data_dir, "validation_results")
+    
+    # If the directory already exists, remove it to ensure clean results
+    if os.path.exists(results_dir):
+        shutil.rmtree(results_dir)
+        print(f"Removed existing results directory: {results_dir}")
+    
+    # Create a fresh directory
+    os.makedirs(results_dir)
+    print(f"Created results directory inside ticker_data: {results_dir}")
+    
+    print(f"Starting enhanced CSV validation on folder: {data_dir}")
+    
+    # Run the validation
+    (ticker_issues_df, column_count_issues_df, date_range_issues_df, 
+     data_quality_issues_df, duplicate_date_issues_df, missing_values_issues_df, 
+     total_files, all_file_tickers) = check_ticker_csvs(data_dir)
+    
+    # Check for expected tickers that are missing files
+    # This would require a reference list - let's load it if available
+    reference_tickers = set()
+    script_dir = os.getcwd()
+    reference_file = os.path.join(script_dir, "total_tickers.csv")
+    if os.path.exists(reference_file):
+        print(f"Loading reference ticker list from {reference_file}")
+        try:
+            ref_df = pd.read_csv(reference_file)
+            if 'Ticker' in ref_df.columns:
+                reference_tickers = set(ref_df['Ticker'].unique())
+                
+                # Find missing tickers
+                missing_tickers = reference_tickers - all_file_tickers
+                if missing_tickers:
+                    missing_tickers_df = pd.DataFrame({'Missing_Ticker': list(missing_tickers)})
+                    missing_tickers_file = os.path.join(results_dir, "missing_tickers.csv")
+                    missing_tickers_df.to_csv(missing_tickers_file, index=False)
+                    print(f"Saved {len(missing_tickers)} missing tickers to {missing_tickers_file}")
+                else:
+                    print("No missing tickers found - all expected tickers have files.")
+        except Exception as e:
+            print(f"Error loading reference ticker list: {e}")
+    
+    # Save results if there are any issues
+    if not ticker_issues_df.empty:
+        output_file = os.path.join(results_dir, "ticker_column_issues.csv")
+        ticker_issues_df.to_csv(output_file, index=False)
+        print(f"Saved {len(ticker_issues_df)} ticker issues to {output_file}")
+        
+        # Save ticker-only CSV
+        if 'expected_ticker' in ticker_issues_df.columns:
+            ticker_only_csv = os.path.join(results_dir, "ticker_column_issues_ticker_only.csv")
+            pd.DataFrame({'ticker': ticker_issues_df['expected_ticker']}).to_csv(ticker_only_csv, index=False)
+            print(f"Saved ticker-only CSV for ticker column issues to {ticker_only_csv}")
+    else:
+        print("No ticker column issues found.")
+        
+    if not column_count_issues_df.empty:
+        output_file = os.path.join(results_dir, "column_issues.csv")
+        column_count_issues_df.to_csv(output_file, index=False)
+        print(f"Saved {len(column_count_issues_df)} files with column issues to {output_file}")
+        
+        # Extract ticker from file path and save as ticker-only CSV
+        if 'file' in column_count_issues_df.columns:
+            tickers = [os.path.splitext(os.path.basename(file_path))[0] for file_path in column_count_issues_df['file']]
+            ticker_only_csv = os.path.join(results_dir, "column_issues_ticker_only.csv")
+            pd.DataFrame({'ticker': tickers}).to_csv(ticker_only_csv, index=False)
+            print(f"Saved ticker-only CSV for column issues to {ticker_only_csv}")
+    else:
+        print("No column issues found.")
+    
+    if not date_range_issues_df.empty:
+        output_file = os.path.join(results_dir, "date_range_issues.csv")
+        date_range_issues_df.to_csv(output_file, index=False)
+        print(f"Saved {len(date_range_issues_df)} files with date range issues to {output_file}")
+        
+        # Save ticker-only CSV
+        if 'ticker' in date_range_issues_df.columns:
+            ticker_only_csv = os.path.join(results_dir, "date_range_issues_ticker_only.csv")
+            pd.DataFrame({'ticker': date_range_issues_df['ticker']}).to_csv(ticker_only_csv, index=False)
+            print(f"Saved ticker-only CSV for date range issues to {ticker_only_csv}")
+    else:
+        print("No date range issues found.")
+    
+    if not data_quality_issues_df.empty:
+        output_file = os.path.join(results_dir, "data_quality_issues.csv")
+        data_quality_issues_df.to_csv(output_file, index=False)
+        print(f"Saved {len(data_quality_issues_df)} files with data quality issues to {output_file}")
+        
+        # Save ticker-only CSV
+        if 'ticker' in data_quality_issues_df.columns:
+            ticker_only_csv = os.path.join(results_dir, "data_quality_issues_ticker_only.csv")
+            pd.DataFrame({'ticker': data_quality_issues_df['ticker']}).to_csv(ticker_only_csv, index=False)
+            print(f"Saved ticker-only CSV for data quality issues to {ticker_only_csv}")
+    else:
+        print("No data quality issues found.")
+    
+    if not duplicate_date_issues_df.empty:
+        output_file = os.path.join(results_dir, "duplicate_date_issues.csv")
+        duplicate_date_issues_df.to_csv(output_file, index=False)
+        print(f"Saved {len(duplicate_date_issues_df)} files with duplicate date issues to {output_file}")
+        
+        # Save ticker-only CSV
+        if 'ticker' in duplicate_date_issues_df.columns:
+            ticker_only_csv = os.path.join(results_dir, "duplicate_date_issues_ticker_only.csv")
+            pd.DataFrame({'ticker': duplicate_date_issues_df['ticker']}).to_csv(ticker_only_csv, index=False)
+            print(f"Saved ticker-only CSV for duplicate date issues to {ticker_only_csv}")
+    else:
+        print("No duplicate date issues found.")
+    
+    if not missing_values_issues_df.empty:
+        output_file = os.path.join(results_dir, "missing_values_issues.csv")
+        missing_values_issues_df.to_csv(output_file, index=False)
+        print(f"Saved {len(missing_values_issues_df)} files with missing values to {output_file}")
+        
+        # Save ticker-only CSV
+        if 'ticker' in missing_values_issues_df.columns:
+            ticker_only_csv = os.path.join(results_dir, "missing_values_issues_ticker_only.csv")
+            pd.DataFrame({'ticker': missing_values_issues_df['ticker']}).to_csv(ticker_only_csv, index=False)
+            print(f"Saved ticker-only CSV for missing values issues to {ticker_only_csv}")
+    else:
+        print("No missing values issues found.")
+    
+    # Extract and save ticker-only lists for each issue type
+    # This will create simple files with just the list of tickers having each issue
+    
+    # Save ticker-only lists for each issue type
+    if not ticker_issues_df.empty and 'expected_ticker' in ticker_issues_df.columns:
+        ticker_only_file = os.path.join(results_dir, "tickers_with_column_issues.txt")
+        ticker_list = sorted(ticker_issues_df['expected_ticker'].unique())
+        with open(ticker_only_file, 'w') as f:
+            f.write('\n'.join(ticker_list))
+        print(f"Saved {len(ticker_list)} tickers with column issues to {ticker_only_file}")
+    
+    if not column_count_issues_df.empty and 'file' in column_count_issues_df.columns:
+        # Extract ticker from file path
+        column_issues_tickers = set()
+        for file_path in column_count_issues_df['file']:
+            ticker = os.path.splitext(os.path.basename(file_path))[0]
+            column_issues_tickers.add(ticker)
+        
+        ticker_only_file = os.path.join(results_dir, "tickers_with_structure_issues.txt")
+        ticker_list = sorted(column_issues_tickers)
+        with open(ticker_only_file, 'w') as f:
+            f.write('\n'.join(ticker_list))
+        print(f"Saved {len(ticker_list)} tickers with structure issues to {ticker_only_file}")
+    
+    if not date_range_issues_df.empty and 'ticker' in date_range_issues_df.columns:
+        ticker_only_file = os.path.join(results_dir, "tickers_with_date_issues.txt")
+        ticker_list = sorted(date_range_issues_df['ticker'].unique())
+        with open(ticker_only_file, 'w') as f:
+            f.write('\n'.join(ticker_list))
+        print(f"Saved {len(ticker_list)} tickers with date issues to {ticker_only_file}")
+    
+    if not data_quality_issues_df.empty and 'ticker' in data_quality_issues_df.columns:
+        ticker_only_file = os.path.join(results_dir, "tickers_with_quality_issues.txt")
+        ticker_list = sorted(data_quality_issues_df['ticker'].unique())
+        with open(ticker_only_file, 'w') as f:
+            f.write('\n'.join(ticker_list))
+        print(f"Saved {len(ticker_list)} tickers with quality issues to {ticker_only_file}")
+    
+    if not duplicate_date_issues_df.empty and 'ticker' in duplicate_date_issues_df.columns:
+        ticker_only_file = os.path.join(results_dir, "tickers_with_duplicate_dates.txt")
+        ticker_list = sorted(duplicate_date_issues_df['ticker'].unique())
+        with open(ticker_only_file, 'w') as f:
+            f.write('\n'.join(ticker_list))
+        print(f"Saved {len(ticker_list)} tickers with duplicate dates to {ticker_only_file}")
+    
+    if not missing_values_issues_df.empty and 'ticker' in missing_values_issues_df.columns:
+        ticker_only_file = os.path.join(results_dir, "tickers_with_missing_values.txt")
+        ticker_list = sorted(missing_values_issues_df['ticker'].unique())
+        with open(ticker_only_file, 'w') as f:
+            f.write('\n'.join(ticker_list))
+        print(f"Saved {len(ticker_list)} tickers with missing values to {ticker_only_file}")
+    
+    # Save a consolidated list of all problematic tickers
+    all_problem_tickers = set()
+    
+    # Add tickers from each issue type
+    if not ticker_issues_df.empty and 'expected_ticker' in ticker_issues_df.columns:
+        all_problem_tickers.update(ticker_issues_df['expected_ticker'])
+    
+    if not column_count_issues_df.empty and 'file' in column_count_issues_df.columns:
+        for file_path in column_count_issues_df['file']:
+            ticker = os.path.splitext(os.path.basename(file_path))[0]
+            all_problem_tickers.add(ticker)
+    
+    if not date_range_issues_df.empty and 'ticker' in date_range_issues_df.columns:
+        all_problem_tickers.update(date_range_issues_df['ticker'])
+    
+    if not data_quality_issues_df.empty and 'ticker' in data_quality_issues_df.columns:
+        all_problem_tickers.update(data_quality_issues_df['ticker'])
+    
+    if not duplicate_date_issues_df.empty and 'ticker' in duplicate_date_issues_df.columns:
+        all_problem_tickers.update(duplicate_date_issues_df['ticker'])
+    
+    if not missing_values_issues_df.empty and 'ticker' in missing_values_issues_df.columns:
+        all_problem_tickers.update(missing_values_issues_df['ticker'])
+    
+    # Save the consolidated list as TXT
+    if all_problem_tickers:
+        all_issues_file = os.path.join(results_dir, "all_problem_tickers.txt")
+        ticker_list = sorted(all_problem_tickers)
+        with open(all_issues_file, 'w') as f:
+            f.write('\n'.join(ticker_list))
+        print(f"Saved {len(ticker_list)} tickers with any type of issue to {all_issues_file}")
+        
+        # Also save as CSV
+        all_issues_csv = os.path.join(results_dir, "all_problem_tickers.csv")
+        pd.DataFrame({'ticker': ticker_list}).to_csv(all_issues_csv, index=False)
+        print(f"Saved all problem tickers CSV to {all_issues_csv}")
+    
+    # Create a summary report
+    summary = {
+        'Total files processed': total_files,
+        'Total tickers found': len(all_file_tickers),
+        'Total subfolders': len([f.path for f in os.scandir(data_dir) if f.is_dir() and not os.path.basename(f.path).startswith("_")]),
+        'Files with ticker issues': len(ticker_issues_df),
+        'Files with column issues': len(column_count_issues_df),
+        'Files with date range issues': len(date_range_issues_df),
+        'Files with data quality issues': len(data_quality_issues_df),
+        'Files with duplicate dates': len(duplicate_date_issues_df),
+        'Files with missing values': len(missing_values_issues_df),
+        'Unique tickers with any issue': len(all_problem_tickers),
+        'Missing tickers (expected but not found)': len(reference_tickers - all_file_tickers) if reference_tickers else 'Reference list not available'
+    }
+    
+    # Save the summary to a text file inside ticker_data - with fixed name (no timestamp)
+    summary_file = os.path.join(results_dir, "validation_summary.txt")
+    with open(summary_file, 'w') as f:
+        f.write("Validation Summary Report\n")
+        f.write("=======================\n\n")
+        f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Data directory: {data_dir}\n\n")
+        
+        for key, value in summary.items():
+            f.write(f"{key}: {value}\n")
+        
+        # Add a top issues summary section
+        f.write("\nTop Issues By Category:\n")
+        f.write("---------------------\n")
+        
+        if not ticker_issues_df.empty and 'expected_ticker' in ticker_issues_df.columns:
+            ticker_counts = ticker_issues_df['expected_ticker'].value_counts().head(10)
+            f.write("\nTop 10 tickers with issues:\n")
+            for ticker, count in ticker_counts.items():
+                f.write(f"  {ticker}: {count} issues\n")
+        
+        # Enhanced date range issue analysis
+        if not date_range_issues_df.empty and 'total_missing_days' in date_range_issues_df.columns:
+            f.write("\nDate Range Issues Analysis:\n")
+            
+            # Summary of missing patterns
+            if 'missing_pattern' in date_range_issues_df.columns:
+                pattern_counts = date_range_issues_df['missing_pattern'].value_counts()
+                f.write("\nMissing data patterns:\n")
+                for pattern, count in pattern_counts.items():
+                    f.write(f"  {pattern}: {count} files\n")
+            
+            # Average missing days by month
+            avg_jan_missing = date_range_issues_df['missing_days_jan'].mean() if 'missing_days_jan' in date_range_issues_df.columns else 0
+            avg_feb_missing = date_range_issues_df['missing_days_feb'].mean() if 'missing_days_feb' in date_range_issues_df.columns else 0
+            f.write(f"\nAverage missing days by month:\n")
+            f.write(f"  January: {avg_jan_missing:.2f} days\n")
+            f.write(f"  February: {avg_feb_missing:.2f} days\n")
+            
+            # Most problematic tickers
+            worst_date_ranges = date_range_issues_df.sort_values('total_missing_days', ascending=False).head(10)
+            f.write("\nTop 10 tickers with most missing days:\n")
+            for _, row in worst_date_ranges.iterrows():
+                f.write(f"  {row['ticker']}: {row['total_missing_days']} days missing ")
+                f.write(f"({row['missing_pattern']} pattern)\n")
+                
+            # Common missing dates
+            if len(date_range_issues_df) > 10 and 'first_10_missing_dates' in date_range_issues_df.columns:
+                # Extract all missing dates from the first few rows to look for patterns
+                sample_rows = date_range_issues_df.head(20)
+                all_missing_dates = []
+                for _, row in sample_rows.iterrows():
+                    dates_str = row['first_10_missing_dates'].strip('[]')
+                    if dates_str and dates_str != 'None':
+                        try:
+                            # Try to extract dates from the string representation
+                            import ast
+                            dates = ast.literal_eval(f"[{dates_str}]")
+                            all_missing_dates.extend(dates)
+                        except:
+                            pass
+                
+                if all_missing_dates:
+                    from collections import Counter
+                    date_counter = Counter(all_missing_dates)
+                    common_dates = date_counter.most_common(5)
+                    if common_dates:
+                        f.write("\nMost commonly missing dates:\n")
+                        for date, count in common_dates:
+                            f.write(f"  {date}: missing in {count} files\n")
+    
+    print(f"\nSaved validation summary to {summary_file}")
+    print("\nValidation Summary:")
+    for key, value in summary.items():
+        print(f"  - {key}: {value}")
+    
+    return results_dir
+
+def check_ticker_dataframe_consistency(root_folder="./ticker_data", sample_limit=None):
+    """
+    Checks if all ticker files can be loaded into a dataframe and verifies consistency.
+    
+    This function:
+    1. Loads all CSV files from the ticker_data directory
+    2. Checks if each file's ticker column matches its filename
+    3. Verifies column consistency across all files
+    4. Attempts to combine all files into a single dataframe
+    5. Generates a comprehensive report
+    
+    Args:
+        root_folder (str): Path to the root ticker data folder
+        sample_limit (int, optional): Limit the number of files to check (for testing)
+        
+    Returns:
+        tuple: (success_flag, combined_df, report_dict)
+    """
+    import os
+    import pandas as pd
+    import glob
+    from datetime import datetime
+    
+    print(f"Starting ticker dataframe consistency check in: {root_folder}")
+    
+    # Data structures to track results
+    results = {
+        'start_time': datetime.now(),
+        'files_found': 0,
+        'files_loaded': 0,
+        'files_with_ticker_mismatch': 0,
+        'ticker_mismatch_details': [],
+        'column_consistency': {},
+        'combined_df_rows': 0,
+        'combined_df_created': False,
+        'error_files': [],
+    }
+    
+    # Expected columns based on the code structure
+    expected_columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Dividends', 'Stock Splits', 'Ticker']
+    
+    # Find all subfolders containing ticker files
+    all_csv_files = []
+    for subfolder, _, _ in os.walk(root_folder):
+        # Skip validation_results folder if it exists
+        if "validation_results" in subfolder:
+            continue
+            
+        # Find all CSV files in this subfolder
+        csv_files = glob.glob(os.path.join(subfolder, "*.csv"))
+        all_csv_files.extend(csv_files)
+    
+    results['files_found'] = len(all_csv_files)
+    print(f"Found {results['files_found']} CSV files")
+    
+    # Apply sample limit if requested
+    if sample_limit and sample_limit < len(all_csv_files):
+        all_csv_files = all_csv_files[:sample_limit]
+        print(f"Limited to first {sample_limit} files for testing")
+    
+    # Track column sets across files
+    all_column_sets = {}
+    
+    # Prepare for creating a combined dataframe
+    all_dfs = []
+    
+    # Process each file
+    for idx, csv_file in enumerate(all_csv_files):
+        file_basename = os.path.basename(csv_file)
+        ticker_from_filename = os.path.splitext(file_basename)[0]
+        
+        if idx % 100 == 0 or idx == len(all_csv_files) - 1:
+            print(f"Processing file {idx+1}/{len(all_csv_files)}: {file_basename}")
+        
+        try:
+            # Load the CSV file
+            df = pd.read_csv(csv_file)
+            results['files_loaded'] += 1
+            
+            # Track column set
+            columns_tuple = tuple(sorted(df.columns))
+            if columns_tuple not in all_column_sets:
+                all_column_sets[columns_tuple] = 0
+            all_column_sets[columns_tuple] += 1
+            
+            # Check if the Ticker column exists and matches filename
+            if 'Ticker' in df.columns:
+                unique_tickers = df['Ticker'].unique()
+                
+                # Check for mismatches
+                if len(unique_tickers) != 1 or unique_tickers[0] != ticker_from_filename:
+                    results['files_with_ticker_mismatch'] += 1
+                    results['ticker_mismatch_details'].append({
+                        'file': csv_file,
+                        'expected_ticker': ticker_from_filename,
+                        'found_tickers': ', '.join(map(str, unique_tickers)),
+                        'row_count': len(df)
+                    })
+            else:
+                # No Ticker column found
+                results['files_with_ticker_mismatch'] += 1
+                results['ticker_mismatch_details'].append({
+                    'file': csv_file,
+                    'expected_ticker': ticker_from_filename,
+                    'found_tickers': 'No Ticker column found',
+                    'row_count': len(df)
+                })
+                
+                # Add Ticker column with the filename value for the combined dataframe
+                df['Ticker'] = ticker_from_filename
+            
+            # Add to list for combined dataframe
+            all_dfs.append(df)
+            
+        except Exception as e:
+            results['error_files'].append({
+                'file': csv_file,
+                'error': str(e)
+            })
+            print(f"Error processing {csv_file}: {e}")
+    
+    # Analyze column consistency
+    for idx, (columns, count) in enumerate(all_column_sets.items()):
+        columns_list = list(columns)
+        
+        # Check against expected columns
+        missing = [col for col in expected_columns if col not in columns_list]
+        extra = [col for col in columns_list if col not in expected_columns]
+        
+        results['column_consistency'][f'set_{idx+1}'] = {
+            'columns': columns_list,
+            'file_count': count,
+            'percentage': round((count / results['files_loaded']) * 100, 2) if results['files_loaded'] > 0 else 0,
+            'matches_expected': (not missing and not extra),
+            'missing_expected': missing,
+            'extra_columns': extra
+        }
+    
+    # Try to create a combined dataframe
+    if all_dfs:
+        try:
+            combined_df = pd.concat(all_dfs, ignore_index=True)
+            results['combined_df_created'] = True
+            results['combined_df_rows'] = len(combined_df)
+            results['combined_df_columns'] = combined_df.columns.tolist()
+            
+            # Check data types in combined dataframe
+            results['column_dtypes'] = {col: str(combined_df[col].dtype) for col in combined_df.columns}
+            
+            # Create a sample of the combined dataframe (for demonstration)
+            sample_df = combined_df.head(5) if len(combined_df) > 5 else combined_df
+            results['combined_df_sample'] = sample_df.to_dict(orient='records')
+            
+        except Exception as e:
+            results['combined_df_error'] = str(e)
+            print(f"Error creating combined dataframe: {e}")
+    
+    # Calculate end time and duration
+    results['end_time'] = datetime.now()
+    results['duration_seconds'] = (results['end_time'] - results['start_time']).total_seconds()
+    
+    # Print summary
+    print("\nTicker Dataframe Consistency Check Summary:")
+    print(f"Files found: {results['files_found']}")
+    print(f"Files successfully loaded: {results['files_loaded']}")
+    print(f"Files with ticker mismatches: {results['files_with_ticker_mismatch']}")
+    print(f"Distinct column sets found: {len(results['column_consistency'])}")
+    
+    if results['combined_df_created']:
+        print(f"Successfully created combined dataframe with {results['combined_df_rows']} rows")
+    else:
+        print("Failed to create combined dataframe")
+    
+    print(f"Total processing time: {results['duration_seconds']:.2f} seconds")
+    
+    # Return results
+    return (
+        results['combined_df_created'],
+        combined_df if results['combined_df_created'] else None,
+        results
+    )
+
+def save_validation_results(results, script_dir=None, output_dir=None):
+    """
+    Saves the validation results to files in the same directory as the script.
+    
+    Args:
+        results (dict): Results dictionary from validation
+        script_dir (str, optional): Directory containing the script file
+        output_dir (str, optional): Directory to save results. If None, uses script_dir/validation_results
+        
+    Returns:
+        str: Path to the saved results directory
+    """
+    import os
+    import pandas as pd
+    import json
+    import sys
+    from datetime import datetime
+    
+    # Determine where to save the results
+    if output_dir is None:
+        if script_dir is None:
+            # Try to get the directory of the current script
+            try:
+                script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+            except:
+                # Fallback to current working directory
+                script_dir = os.getcwd()
+            
+        # Create validation_results folder inside the script directory
+        output_dir = os.path.join(script_dir, "validation_results")
+    
+    print(f"Saving validation results to: {output_dir}")
+    
+    # Create the output directory if it doesn't exist
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"Created output directory: {output_dir}")
+    
+    # Convert datetime objects to strings for JSON serialization
+    results_copy = results.copy()
+    if 'start_time' in results_copy:
+        results_copy['start_time'] = str(results_copy['start_time'])
+    if 'end_time' in results_copy:
+        results_copy['end_time'] = str(results_copy['end_time'])
+    
+    # Save main results summary as JSON
+    summary_file = os.path.join(output_dir, "validation_summary.json")
+    with open(summary_file, 'w') as f:
+        json.dump(results_copy, f, indent=4)
+    print(f"Saved summary to {summary_file}")
+    
+    # Save ticker mismatches as CSV if any exist
+    if results_copy.get('ticker_mismatch_details'):
+        mismatches_file = os.path.join(output_dir, "ticker_mismatches.csv")
+        pd.DataFrame(results_copy['ticker_mismatch_details']).to_csv(mismatches_file, index=False)
+        print(f"Saved ticker mismatches to {mismatches_file}")
+    
+    # Save column consistency details as CSV
+    if results_copy.get('column_consistency'):
+        # Flatten the column consistency structure
+        column_sets = []
+        for set_id, details in results_copy['column_consistency'].items():
+            row = {
+                'set_id': set_id,
+                'file_count': details['file_count'],
+                'percentage': details['percentage'],
+                'matches_expected': details['matches_expected'],
+                'columns': ', '.join(str(col) for col in details['columns']),
+                'missing_expected': ', '.join(str(col) for col in details['missing_expected']) if details['missing_expected'] else 'None',
+                'extra_columns': ', '.join(str(col) for col in details['extra_columns']) if details['extra_columns'] else 'None'
+            }
+            column_sets.append(row)
+        
+        columns_file = os.path.join(output_dir, "column_sets.csv")
+        pd.DataFrame(column_sets).to_csv(columns_file, index=False)
+        print(f"Saved column set analysis to {columns_file}")
+    
+    # Save error files list as CSV if any exist
+    if results_copy.get('error_files'):
+        errors_file = os.path.join(output_dir, "error_files.csv")
+        pd.DataFrame(results_copy['error_files']).to_csv(errors_file, index=False)
+        print(f"Saved error files list to {errors_file}")
+    
+    # Create a text summary report
+    summary_txt_file = os.path.join(output_dir, "validation_report.txt")
+    with open(summary_txt_file, 'w') as f:
+        f.write("Ticker Data Validation Report\n")
+        f.write("============================\n\n")
+        f.write(f"Start Time: {results_copy.get('start_time', 'Unknown')}\n")
+        f.write(f"End Time: {results_copy.get('end_time', 'Unknown')}\n")
+        f.write(f"Duration: {results_copy.get('duration_seconds', 0):.2f} seconds\n\n")
+        
+        f.write("Overall Statistics\n")
+        f.write("-----------------\n")
+        f.write(f"Files found: {results_copy.get('files_found', 0)}\n")
+        f.write(f"Files successfully loaded: {results_copy.get('files_loaded', 0)}\n")
+        f.write(f"Files with ticker mismatches: {results_copy.get('files_with_ticker_mismatch', 0)}\n")
+        f.write(f"Distinct column sets found: {len(results_copy.get('column_consistency', {}))}\n\n")
+        
+        if results_copy.get('combined_df_created'):
+            f.write("Combined Dataframe\n")
+            f.write("-----------------\n")
+            f.write(f"Created successfully: Yes\n")
+            f.write(f"Total rows: {results_copy.get('combined_df_rows', 0)}\n")
+            f.write(f"Columns: {', '.join(results_copy.get('combined_df_columns', []))}\n\n")
+            
+            if results_copy.get('column_dtypes'):
+                f.write("Column Data Types\n")
+                f.write("----------------\n")
+                for col, dtype in results_copy['column_dtypes'].items():
+                    f.write(f"{col}: {dtype}\n")
+                f.write("\n")
+        else:
+            f.write("Combined Dataframe\n")
+            f.write("-----------------\n")
+            f.write("Created successfully: No\n")
+            if results_copy.get('combined_df_error'):
+                f.write(f"Error: {results_copy['combined_df_error']}\n\n")
+        
+        if results_copy.get('column_consistency'):
+            f.write("Column Set Analysis\n")
+            f.write("------------------\n")
+            for set_id, details in results_copy['column_consistency'].items():
+                f.write(f"Set {set_id}:\n")
+                f.write(f"  Files: {details['file_count']} ({details['percentage']}% of total)\n")
+                f.write(f"  Matches expected structure: {'Yes' if details['matches_expected'] else 'No'}\n")
+                f.write(f"  Columns: {', '.join(str(col) for col in details['columns'])}\n")
+                
+                if details['missing_expected']:
+                    f.write(f"  Missing expected columns: {', '.join(str(col) for col in details['missing_expected'])}\n")
+                
+                if details['extra_columns']:
+                    f.write(f"  Extra columns: {', '.join(str(col) for col in details['extra_columns'])}\n")
+                
+                f.write("\n")
+    
+    print(f"Saved detailed report to {summary_txt_file}")
+    return output_dir
+
+def validate_ticker_data(root_folder=None, sample_limit=None, script_dir=None):
+    """
+    Standalone validation function that can be imported and called from the main script.
+    This function checks ticker files across server folders without modifying the original code.
+    
+    Args:
+        root_folder (str, optional): Path to the root ticker data folder. If None, tries multiple locations.
+        sample_limit (int, optional): Limit the number of files to process. If None, processes all files.
+        script_dir (str, optional): Directory containing the script file, for saving results.
+        
+    Returns:
+        tuple: (success_flag, combined_df, report_dict)
+    """
+    import os
+    import pandas as pd
+    import glob
+    import sys
+    from datetime import datetime
+    import time
+    
+    # Try to get the script directory if not provided
+    if script_dir is None:
+        try:
+            script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+        except:
+            # Fallback to current working directory
+            script_dir = os.getcwd()
+    
+    print(f"Script directory: {script_dir}")
+    
+    print("Starting ticker data validation...")
+    start_time = time.time()
+    
+    # Hardcoded server folder names based on the image
+    server_folders = [
+        "ubu-srv-01",
+        "ubu-srv-02",
+        "ubu-srv-03",
+        "ubu-srv-04",
+        "ubu-srv-05",
+        "ubu-srv-06"
+    ]
+    
+    # Try multiple potential root folder locations if not specified
+    potential_paths = []
+    if root_folder:
+        potential_paths.append(root_folder)
+    else:
+        # First check script_dir/ticker_data
+        if script_dir:
+            potential_paths.append(os.path.join(script_dir, "ticker_data"))
+        
+        # Add various other potential paths to check
+        potential_paths.extend([
+            "./ticker_data",                                 # Relative to current dir
+            "/home/ricardo/streamlit_stocks/ticker_data",    # Relative to script location
+            "/home/ricardo/ticker_data",                     # User home
+            "../ticker_data",                                # Up one level
+            "ticker_data"                                    # Simple relative
+        ])
+    
+    # Data structures to track results
+    results = {
+        'start_time': datetime.now(),
+        'files_found': 0,
+        'files_loaded': 0,
+        'files_with_ticker_mismatch': 0,
+        'ticker_mismatch_details': [],
+        'column_consistency': {},
+        'combined_df_rows': 0,
+        'combined_df_created': False,
+        'error_files': [],
+        'script_dir': script_dir
+    }
+    
+    # Expected columns based on the code structure
+    expected_columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Dividends', 'Stock Splits', 'Ticker']
+    
+    # Find all CSV files in the server folders across potential paths
+    all_csv_files = []
+    used_root_folder = None
+    
+    for root_path in potential_paths:
+        print(f"Checking for ticker data in: {root_path}")
+        
+        # First check if the root folder itself exists
+        if not os.path.exists(root_path):
+            print(f"  - Directory does not exist: {root_path}")
+            continue
+            
+        print(f"  - Directory exists: {root_path}")
+        
+        # Check for server folders or CSV files directly in this path
+        csv_files_found = False
+        
+        # First try with the server folders
+        for server in server_folders:
+            server_path = os.path.join(root_path, server)
+            if os.path.exists(server_path):
+                # Find all CSV files in this server folder
+                csv_files = glob.glob(os.path.join(server_path, "*.csv"))
+                if csv_files:
+                    all_csv_files.extend(csv_files)
+                    csv_files_found = True
+                    print(f"  - Found {len(csv_files)} CSV files in {server}")
+        
+        # If no server folders with CSVs found, check for CSVs directly in this path
+        if not csv_files_found:
+            direct_csv_files = glob.glob(os.path.join(root_path, "*.csv"))
+            if direct_csv_files:
+                all_csv_files.extend(direct_csv_files)
+                csv_files_found = True
+                print(f"  - Found {len(direct_csv_files)} CSV files directly in {root_path}")
+        
+        # Also try to find any folder that might contain csv files
+        if not csv_files_found:
+            for item in os.listdir(root_path):
+                item_path = os.path.join(root_path, item)
+                if os.path.isdir(item_path) and not item.startswith('.') and not item.startswith('_'):
+                    subfolder_csv_files = glob.glob(os.path.join(item_path, "*.csv"))
+                    if subfolder_csv_files:
+                        all_csv_files.extend(subfolder_csv_files)
+                        csv_files_found = True
+                        print(f"  - Found {len(subfolder_csv_files)} CSV files in subfolder {item}")
+        
+        if csv_files_found:
+            used_root_folder = root_path
+            break  # Stop looking in other paths once we find files
+    
+    results['files_found'] = len(all_csv_files)
+    print(f"Found {results['files_found']} CSV files in total")
+    
+    # If no files found, give a helpful diagnostic message
+    if results['files_found'] == 0:
+        print("\nNo CSV files found. Here's why this might be happening:")
+        print("1. The ticker_data folder might be in a different location than expected")
+        print("2. The server folders might have different names than expected")
+        print("3. There might not be any CSV files in the expected locations")
+        print("\nHere are some troubleshooting steps:")
+        print("1. Try running the script with an explicit path: validate_ticker_data('/full/path/to/ticker_data')")
+        print("2. Check the actual structure of your ticker_data directory")
+        print("3. Look for any CSV files using the 'find' command in Linux:")
+        print("   find /home/ricardo -name \"*.csv\" -type f | grep -v validation_results")
+        
+        return False, None, results
+    
+    print(f"\nUsing root folder: {used_root_folder}")
+    
+    # Apply a sample limit if specified
+    if sample_limit and sample_limit < len(all_csv_files):
+        print(f"Using a sample of {sample_limit} files for testing (out of {len(all_csv_files)} total)")
+        all_csv_files = all_csv_files[:sample_limit]
+    else:
+        print(f"Processing all {len(all_csv_files)} files")
+    
+    # Track column sets across files
+    all_column_sets = {}
+    
+    # Prepare for creating a combined dataframe
+    all_dfs = []
+    
+    # Process each file
+    for idx, csv_file in enumerate(all_csv_files):
+        file_basename = os.path.basename(csv_file)
+        ticker_from_filename = os.path.splitext(file_basename)[0]
+        
+        # Print progress every 500 files or at the end
+        if idx % 500 == 0 or idx == len(all_csv_files) - 1:
+            print(f"Processing file {idx+1}/{len(all_csv_files)}: {file_basename}")
+        
+        try:
+            # Load the CSV file
+            df = pd.read_csv(csv_file)
+            results['files_loaded'] += 1
+            
+            # Track column set
+            columns_tuple = tuple(sorted(df.columns))
+            if columns_tuple not in all_column_sets:
+                all_column_sets[columns_tuple] = 0
+            all_column_sets[columns_tuple] += 1
+            
+            # Check if the Ticker column exists and matches filename
+            if 'Ticker' in df.columns:
+                unique_tickers = df['Ticker'].unique()
+                
+                # Check for mismatches
+                if len(unique_tickers) != 1 or unique_tickers[0] != ticker_from_filename:
+                    results['files_with_ticker_mismatch'] += 1
+                    results['ticker_mismatch_details'].append({
+                        'file': csv_file,
+                        'expected_ticker': ticker_from_filename,
+                        'found_tickers': ', '.join(map(str, unique_tickers)),
+                        'row_count': len(df)
+                    })
+            else:
+                # No Ticker column found
+                results['files_with_ticker_mismatch'] += 1
+                results['ticker_mismatch_details'].append({
+                    'file': csv_file,
+                    'expected_ticker': ticker_from_filename,
+                    'found_tickers': 'No Ticker column found',
+                    'row_count': len(df)
+                })
+                
+                # Add Ticker column with the filename value for the combined dataframe
+                df['Ticker'] = ticker_from_filename
+            
+            # Add to list for combined dataframe
+            all_dfs.append(df)
+            
+        except Exception as e:
+            results['error_files'].append({
+                'file': csv_file,
+                'error': str(e)
+            })
+            print(f"Error processing {csv_file}: {e}")
+    
+    # Analyze column consistency
+    for idx, (columns, count) in enumerate(all_column_sets.items()):
+        columns_list = list(columns)
+        
+        # Check against expected columns
+        missing = [col for col in expected_columns if col not in columns_list]
+        extra = [col for col in columns_list if col not in expected_columns]
+        
+        results['column_consistency'][f'set_{idx+1}'] = {
+            'columns': columns_list,
+            'file_count': count,
+            'percentage': round((count / results['files_loaded']) * 100, 2) if results['files_loaded'] > 0 else 0,
+            'matches_expected': (not missing and not extra),
+            'missing_expected': missing,
+            'extra_columns': extra
+        }
+    
+    # Try to create a combined dataframe
+    if all_dfs:
+        try:
+            combined_df = pd.concat(all_dfs, ignore_index=True)
+            results['combined_df_created'] = True
+            results['combined_df_rows'] = len(combined_df)
+            results['combined_df_columns'] = combined_df.columns.tolist()
+            
+            # Check data types in combined dataframe
+            results['column_dtypes'] = {col: str(combined_df[col].dtype) for col in combined_df.columns}
+            
+            # Create a sample of the combined dataframe (for demonstration)
+            sample_df = combined_df.head(5) if len(combined_df) > 5 else combined_df
+            results['combined_df_sample'] = sample_df.to_dict(orient='records')
+            
+        except Exception as e:
+            results['combined_df_error'] = str(e)
+            print(f"Error creating combined dataframe: {e}")
+    
+    # Calculate end time and duration
+    results['end_time'] = datetime.now()
+    results['duration_seconds'] = (results['end_time'] - results['start_time']).total_seconds()
+    
+    # Print summary
+    print("\nTicker Dataframe Consistency Check Summary:")
+    print(f"Files found: {results['files_found']}")
+    print(f"Files successfully loaded: {results['files_loaded']}")
+    print(f"Files with ticker mismatches: {results['files_with_ticker_mismatch']}")
+    print(f"Distinct column sets found: {len(results['column_consistency'])}")
+    
+    if results['combined_df_created']:
+        print(f"Successfully created combined dataframe with {results['combined_df_rows']} rows")
+    else:
+        print("Failed to create combined dataframe")
+    
+    elapsed_time = time.time() - start_time
+    print(f"Total processing time: {elapsed_time:.2f} seconds")
+    
+    # Return results
+    return (
+        results['combined_df_created'],
+        combined_df if results['combined_df_created'] else None,
+        results
+    )
+
+def extract_good_tickers(results, output_path=None, script_dir=None):
+    """
+    Extracts a list of 'good' tickers from validation results and saves them to a CSV file.
+    'Good' tickers are defined as those belonging to set_1 with the expected column structure.
+    
+    Args:
+        results (dict): The results dictionary from validate_ticker_data()
+        output_path (str, optional): Path where the CSV file should be saved
+        script_dir (str, optional): Directory of the script, for default output path
+        
+    Returns:
+        tuple: (Path to the saved CSV file, list of good tickers)
+    """
+    import os
+    import pandas as pd
+    import sys
+    import glob
+    from datetime import datetime
+    
+    print("Extracting good tickers from validation results...")
+    
+    # Determine the output path if not provided
+    if output_path is None:
+        # Try to use script_dir if provided
+        if script_dir is None:
+            try:
+                script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+            except:
+                # Fallback to current working directory
+                script_dir = os.getcwd()
+        
+        # Use the script directory for the output
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(script_dir, f"good_tickers_{timestamp}.csv")
+    
+    # Get files with ticker mismatches (to exclude them)
+    bad_tickers = set()
+    if 'ticker_mismatch_details' in results:
+        for item in results['ticker_mismatch_details']:
+            if 'expected_ticker' in item:
+                bad_tickers.add(item['expected_ticker'])
+    
+    # Get files with errors (to exclude them)
+    if 'error_files' in results:
+        for item in results['error_files']:
+            if 'file' in item:
+                # Extract ticker name from file path
+                file_name = os.path.basename(item['file'])
+                ticker = os.path.splitext(file_name)[0]
+                bad_tickers.add(ticker)
+    
+    # Find the "good" column set (set_1 or any set that matches the expected structure)
+    good_set_id = None
+    expected_columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Dividends', 'Stock Splits', 'Ticker']
+    
+    if 'column_consistency' in results:
+        for set_id, details in results['column_consistency'].items():
+            # Look for set_1 or any set that matches expected structure
+            columns = details.get('columns', [])
+            
+            # Check if this set has all expected columns
+            has_all_expected = all(col in columns for col in expected_columns)
+            
+            if has_all_expected:
+                good_set_id = set_id
+                print(f"Found good column structure in {set_id} with {details.get('file_count', 0)} files")
+                break
+    
+    # If we found a good set but it doesn't have file_list, we need to scan the directory
+    good_tickers = []
+    
+    # Direct approach: Use the found root folder from validation to get all ticker files
+    root_folder = None
+    if 'root_folder' in results:
+        root_folder = results['root_folder']
+    
+    # Try other ways to get the root folder
+    if not root_folder and 'script_dir' in results:
+        potential_root = os.path.join(results['script_dir'], 'ticker_data')
+        if os.path.exists(potential_root):
+            root_folder = potential_root
+    
+    if not root_folder:
+        # Try to find it from the validation results
+        if 'ticker_mismatch_details' in results and results['ticker_mismatch_details']:
+            first_file = results['ticker_mismatch_details'][0].get('file', '')
+            if first_file:
+                # Extract the root folder from the file path
+                root_folder = os.path.dirname(os.path.dirname(first_file))
+    
+    # If we have a root folder, scan it for CSV files
+    if root_folder and os.path.exists(root_folder):
+        print(f"Scanning ticker files in {root_folder}")
+        
+        # Get server folders
+        server_folders = [
+            "ubu-srv-01", "ubu-srv-02", "ubu-srv-03", 
+            "ubu-srv-04", "ubu-srv-05", "ubu-srv-06"
+        ]
+        
+        # Collect all tickers from all server folders
+        all_ticker_files = []
+        
+        for server in server_folders:
+            server_path = os.path.join(root_folder, server)
+            if os.path.exists(server_path):
+                csv_files = glob.glob(os.path.join(server_path, "*.csv"))
+                all_ticker_files.extend(csv_files)
+        
+        print(f"Found {len(all_ticker_files)} ticker files across all server folders")
+        
+        # Extract tickers from filenames
+        for file_path in all_ticker_files:
+            file_name = os.path.basename(file_path)
+            ticker = os.path.splitext(file_name)[0]
+            
+            # Skip bad tickers
+            if ticker in bad_tickers:
+                continue
+            
+            # If we have a good set ID, check if this file matches that structure
+            if good_set_id:
+                try:
+                    df = pd.read_csv(file_path, nrows=1)  # Just read the header
+                    # Check if it has all expected columns
+                    if all(col in df.columns for col in expected_columns):
+                        good_tickers.append(ticker)
+                except Exception as e:
+                    print(f"Error checking ticker {ticker}: {e}")
+            else:
+                # If we don't have a specific good set, include all files that aren't explicitly bad
+                good_tickers.append(ticker)
+    
+    # Alternative approach if we still don't have good tickers
+    if not good_tickers and 'combined_df_created' in results and results['combined_df_created']:
+        print("Extracting unique tickers from combined dataframe...")
+        
+        # Check if we have actual combined_df data
+        if 'combined_df_columns' in results and 'Ticker' in results['combined_df_columns']:
+            # Extract good tickers from the combined dataframe sample
+            if 'combined_df_sample' in results:
+                for row in results['combined_df_sample']:
+                    if 'Ticker' in row:
+                        good_tickers.append(row['Ticker'])
+    
+    # If we still don't have good tickers, try one more approach using all files from validation
+    if not good_tickers:
+        print("Using all processed files from validation...")
+        
+        # Get all files that were successfully loaded during validation
+        if 'files_loaded' in results and results['files_loaded'] > 0:
+            # Since we don't have the actual list, use the server folders again
+            server_folders = [
+                "ubu-srv-01", "ubu-srv-02", "ubu-srv-03", 
+                "ubu-srv-04", "ubu-srv-05", "ubu-srv-06"
+            ]
+            
+            # Use the script_dir to find the ticker_data folder
+            if script_dir:
+                ticker_data_path = os.path.join(script_dir, "ticker_data")
+                if os.path.exists(ticker_data_path):
+                    for server in server_folders:
+                        server_path = os.path.join(ticker_data_path, server)
+                        if os.path.exists(server_path):
+                            for file_name in os.listdir(server_path):
+                                if file_name.endswith('.csv'):
+                                    ticker = os.path.splitext(file_name)[0]
+                                    if ticker not in bad_tickers:
+                                        good_tickers.append(ticker)
+    
+    # Remove duplicates
+    good_tickers = list(set(good_tickers))
+    
+    # Sort the tickers alphabetically
+    good_tickers.sort()
+    
+    # Create and save the DataFrame
+    tickers_df = pd.DataFrame({'Ticker': good_tickers})
+    
+    # Save to CSV
+    tickers_df.to_csv(output_path, index=False)
+    print(f"Saved {len(good_tickers)} good tickers to {output_path}")
+    
+    return output_path, good_tickers
+
+def get_good_tickers_from_validation(validate_ticker_data_func, root_folder=None, sample_limit=None, output_path=None):
+    """
+    Runs ticker validation and extracts good tickers, saving them to a CSV file.
+    This function does not modify existing code, but acts as a wrapper for the
+    validation and extraction processes.
+    
+    Args:
+        validate_ticker_data_func: The validate_ticker_data function to use
+        root_folder (str, optional): Path to the root ticker data folder
+        sample_limit (int, optional): Limit the number of files to validate
+        output_path (str, optional): Path where the good tickers CSV should be saved
+        
+    Returns:
+        tuple: (CSV path, list of good tickers)
+    """
+    import os
+    import sys
+    
+    # Get the script directory
+    try:
+        script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    except:
+        script_dir = os.getcwd()
+    
+    # Run validation using the provided function
+    success, combined_df, results = validate_ticker_data_func(
+        root_folder=root_folder, 
+        sample_limit=sample_limit,
+        script_dir=script_dir
+    )
+    
+    return extract_good_tickers(results, output_path, script_dir)
+
+def remove_duplicate_tickers(csv_filename, output_filename=None):
+    """
+    Removes duplicated ticker symbols from a CSV file.
+    
+    Parameters:
+    csv_filename (str): Path to the CSV file containing tickers
+    output_filename (str, optional): Path to save the deduplicated CSV file.
+                                     If None, overwrites the original file.
+    
+    Returns:
+    tuple: (success (bool), num_original (int), num_unique (int))
+    """
+    import pandas as pd
+    import os
+    
+    # Use the input filename as output if not specified
+    if output_filename is None:
+        output_filename = csv_filename
+    
+    try:
+        # Read the CSV file
+        df = pd.read_csv(csv_filename)
+        
+        # Store the original count
+        original_count = len(df)
+        
+        # Check if the file has a column structure
+        if len(df.columns) == 1:
+            # Single column CSV - just drop duplicates
+            ticker_col = df.columns[0]
+            df = df.drop_duplicates(subset=[ticker_col])
+        else:
+            # Assuming the first column contains tickers
+            ticker_col = df.columns[0]
+            df = df.drop_duplicates(subset=[ticker_col])
+        
+        # Store the deduplicated count
+        unique_count = len(df)
+        
+        # Save the deduplicated data
+        df.to_csv(output_filename, index=False)
+        
+        print(f"Successfully removed duplicates from {csv_filename}")
+        print(f"Original count: {original_count}, Unique count: {unique_count}")
+        print(f"Removed {original_count - unique_count} duplicate entries")
+        print(f"Saved to: {output_filename}")
+        
+        return True, original_count, unique_count
+        
+    except Exception as e:
+        print(f"Error removing duplicates: {str(e)}")
+        return False, 0, 0
+
+def saving_good_tickers():
+    success, combined_df, results = validate_ticker_data()
+    if success:
+        print(f"Successfully created combined dataframe with {len(combined_df)} rows")
+        # Save the results
+        save_validation_results(results)
+        
+        # Extract good tickers to CSV
+        # Create the output path in the script directory
+        good_tickers_path = "./good_tickers.csv"
+        
+        # Extract good tickers from the validation results
+        csv_path, good_tickers = extract_good_tickers(results, output_path=good_tickers_path)
+        print(f"Extracted {len(good_tickers)} good tickers and saved to {csv_path}")
+        remove_duplicate_tickers("good_tickers.csv")
+
+def extractor():
+    """Main execution function."""
+    start_time = time.time()
+    try:
+        # Run parallel tasks
+        run_parallel()
+        
+        # Check the data
+        check_tickers()
+        
+        # Cleaning good tickers
+        saving_good_tickers()
+        
+        # Run the fix for problematic
+        fix_all_problematic_tickers()
+        
+
+
+    except Exception as e:
+        print(f"Error in main execution: {e}")
+    finally:
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        print(f"\nTotal execution time: {elapsed_time:.2f} seconds")
+
+
+# --------------------------
+# Part 1: CSV to Parquet Conversion Functions
+# --------------------------
+
+
+def read_csv_file(file_path):
+    """
+    Read a CSV file and perform basic validation.
+    
+    Args:
+        file_path (str): Path to the CSV file
+        
+    Returns:
+        tuple: (DataFrame or None, error_message)
+    """
+    try:
+        df = pd.read_csv(file_path)
+        
+        # Check if required columns exist
+        required_columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Ticker']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            return None, f"Missing required columns: {', '.join(missing_columns)}"
+        
+        # Convert Date to datetime
+        df['Date'] = pd.to_datetime(df['Date'], utc=True)
+        
+        # Ensure numeric columns are numeric
+        numeric_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        for col in numeric_cols:
+            if not pd.api.types.is_numeric_dtype(df[col]):
+                try:
+                    df[col] = pd.to_numeric(df[col])
+                except:
+                    return None, f"Column '{col}' cannot be converted to numeric"
+        
+        # Add source file info for debugging
+        df['SourceFile'] = os.path.basename(file_path)
+        
+        # Handle optional columns that might be present in some files but not others
+        optional_columns = ['Dividends', 'Stock Splits', 'Capital Gains']
+        for col in optional_columns:
+            if col not in df.columns:
+                df[col] = 0.0  # Add missing columns with default values
+            elif not pd.api.types.is_numeric_dtype(df[col]):
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+        
+        return df, None
+    except Exception as e:
+        return None, f"Error reading {file_path}: {str(e)}"
+
+def get_all_columns(csv_files, num_samples=100):
+    """
+    Sample files to identify all possible columns.
+    
+    Args:
+        csv_files (list): List of CSV file paths
+        num_samples (int): Number of files to sample
+        
+    Returns:
+        set: Set of all column names found
+    """
+    sample_files = csv_files[:num_samples] if len(csv_files) > num_samples else csv_files
+    all_columns = set()
+    
+    for file_path in tqdm(sample_files, desc="Sampling file schemas"):
+        try:
+            df = pd.read_csv(file_path, nrows=5)  # Just read a few rows for schema
+            all_columns.update(df.columns)
+        except Exception:
+            pass  # Skip files that can't be read
+    
+    return all_columns
+
+def combine_to_parquet_with_writer(csv_files, output_file, all_columns, batch_size=100):
+    """
+    Combine CSV files into a single parquet file using PyArrow ParquetWriter.
+    This method is more memory-efficient for very large datasets.
+    
+    Args:
+        csv_files (list): List of CSV file paths
+        output_file (str): Output parquet file path
+        all_columns (set): Set of all column names to include
+        batch_size (int): Number of files to process in each batch
+        
+    Returns:
+        tuple: (valid_files, invalid_files, total_rows)
+    """
+    # Prepare for processing
+    total_rows = 0
+    valid_files = 0
+    invalid_files = []
+    writer = None
+    
+    # Determine optimal number of workers
+    num_cores = multiprocessing.cpu_count()
+    num_workers = max(1, int(num_cores * 0.75))
+    
+    # Create a schema template dataframe with all columns
+    schema_df = pd.DataFrame(columns=list(all_columns))
+    
+    # Set data types for known columns
+    dtypes = {
+        'Date': 'datetime64[ns]',
+        'Open': 'float64',
+        'High': 'float64',
+        'Low': 'float64',
+        'Close': 'float64',
+        'Volume': 'int64',
+        'Ticker': 'string',
+        'Dividends': 'float64',
+        'Stock Splits': 'float64',
+        'Capital Gains': 'float64',
+        'SourceFile': 'string'
+    }
+    
+    for col, dtype in dtypes.items():
+        if col in schema_df.columns:
+            schema_df[col] = schema_df[col].astype(dtype)
+    
+    # Get PyArrow schema from template dataframe
+    schema = pa.Schema.from_pandas(schema_df)
+    
+    # Initialize writer with consistent schema
+    writer = pq.ParquetWriter(output_file, schema)
+    
+    with tqdm(total=len(csv_files), desc="Processing CSV files") as pbar:
+        for i in range(0, len(csv_files), batch_size):
+            batch_files = csv_files[i:i+batch_size]
+            batch_dfs = []
+            
+            with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                future_to_file = {executor.submit(read_csv_file, file_path): file_path for file_path in batch_files}
+                
+                for future in as_completed(future_to_file):
+                    file_path = future_to_file[future]
+                    df, error = future.result()
+                    
+                    if df is not None:
+                        # Ensure all columns from schema are present
+                        for col in all_columns:
+                            if col not in df.columns:
+                                # Add missing columns with appropriate default values
+                                if col in ['Open', 'High', 'Low', 'Close', 'Dividends', 'Stock Splits', 'Capital Gains']:
+                                    df[col] = 0.0
+                                elif col == 'Volume':
+                                    df[col] = 0
+                                elif col == 'Ticker':
+                                    df[col] = os.path.splitext(os.path.basename(file_path))[0]
+                                elif col == 'SourceFile':
+                                    df[col] = os.path.basename(file_path)
+                                else:
+                                    df[col] = None
+                        
+                        batch_dfs.append(df)
+                        valid_files += 1
+                    else:
+                        invalid_files.append((file_path, error))
+                    
+                    pbar.update(1)
+            
+            if batch_dfs:
+                try:
+                    # Combine batch dataframes
+                    combined_df = pd.concat(batch_dfs, ignore_index=True)
+                    batch_rows = len(combined_df)
+                    total_rows += batch_rows
+                    
+                    # Convert to PyArrow table with consistent schema
+                    table = pa.Table.from_pandas(combined_df, schema=schema)
+                    
+                    # Write the batch
+                    writer.write_table(table)
+                    
+                    # Free memory
+                    del batch_dfs, combined_df, table
+                    
+                    print(f"Batch complete. Added {batch_rows} rows. Total: {total_rows} rows")
+                except Exception as e:
+                    print(f"Error processing batch: {str(e)}")
+                    print(f"Skipping this batch and continuing...")
+    
+    # Close the writer
+    if writer:
+        writer.close()
+    
+    return valid_files, invalid_files, total_rows
+
+def combine_csv_to_parquet(folder_path, output_file, batch_size=100, use_writer=True):
+    """
+    Combine multiple CSV files into a single parquet file.
+    
+    Args:
+        folder_path (str): Path to folder containing CSV files
+        output_file (str): Path to output parquet file
+        batch_size (int): Number of files to process in each batch
+        use_writer (bool): Use PyArrow writer (True) or pandas (False)
+        
+    Returns:
+        tuple: (success, message)
+    """
+    start_time = time.time()
+    
+    # Get all CSV files
+    csv_files = glob.glob(os.path.join(folder_path, "**", "*.csv"), recursive=True)
+    print(f"Found {len(csv_files)} CSV files to process")
+    
+    if not csv_files:
+        return False, "No CSV files found"
+    
+    # Create the directory for the output file if it doesn't exist
+    os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+    
+    # Sample files to determine common schema
+    print("Analyzing file schemas to ensure compatibility...")
+    sample_size = min(100, len(csv_files))
+    all_columns = get_all_columns(csv_files, sample_size)
+    
+    print(f"Identified {len(all_columns)} unique columns across sampled files")
+    print(f"Columns: {', '.join(sorted(all_columns))}")
+    
+    # Process using the optimized writer method
+    if use_writer:
+        print("Using PyArrow ParquetWriter for memory-efficient processing")
+        valid_files, invalid_files, total_rows = combine_to_parquet_with_writer(
+            csv_files, output_file, all_columns, batch_size
+        )
+    else:
+        # Legacy method using pandas concat (less memory efficient)
+        print("Using pandas for processing (might require more memory)")
+        all_data = []
+        valid_files = 0
+        invalid_files = []
+        total_rows = 0
+        
+        # Determine optimal number of workers
+        num_cores = multiprocessing.cpu_count()
+        num_workers = max(1, int(num_cores * 0.75))
+        print(f"Using {num_workers} workers out of {num_cores} available CPU cores")
+        
+        with tqdm(total=len(csv_files), desc="Processing CSV files") as pbar:
+            for i in range(0, len(csv_files), batch_size):
+                batch_files = csv_files[i:i+batch_size]
+                batch_dfs = []
+                
+                with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                    future_to_file = {executor.submit(read_csv_file, file_path): file_path for file_path in batch_files}
+                    
+                    for future in as_completed(future_to_file):
+                        file_path = future_to_file[future]
+                        df, error = future.result()
+                        
+                        if df is not None:
+                            batch_dfs.append(df)
+                            valid_files += 1
+                        else:
+                            invalid_files.append((file_path, error))
+                        
+                        pbar.update(1)
+                
+                if batch_dfs:
+                    # Combine dataframes in the batch
+                    combined_df = pd.concat(batch_dfs, ignore_index=True)
+                    total_rows += len(combined_df)
+                    
+                    # Append to the main list
+                    all_data.append(combined_df)
+                    
+                    # Clear memory
+                    del batch_dfs
+        
+        if all_data:
+            print(f"\nCombining {len(all_data)} batches into final dataset...")
+            final_df = pd.concat(all_data, ignore_index=True)
+            
+            print(f"Writing {len(final_df)} rows to parquet file...")
+            final_df.to_parquet(output_file, index=False)
+            
+            # Clear memory
+            del all_data, final_df
+    
+    # Save invalid files list if any
+    if invalid_files:
+        invalid_df = pd.DataFrame(invalid_files, columns=['File', 'Error'])
+        invalid_df.to_csv('invalid_files_parquet_conversion.csv', index=False)
+    
+    # Print summary
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    
+    print(f"\nConversion complete!")
+    print(f"Total files processed: {len(csv_files)}")
+    print(f"Valid files: {valid_files} ({valid_files/len(csv_files)*100:.2f}%)")
+    print(f"Invalid files: {len(invalid_files)} ({len(invalid_files)/len(csv_files)*100:.2f}%)")
+    print(f"Total rows in parquet file: {total_rows}")
+    print(f"Output file: {output_file}")
+    
+    # Check if file exists and get size
+    if os.path.exists(output_file):
+        file_size_mb = os.path.getsize(output_file) / (1024*1024)
+        print(f"File size: {file_size_mb:.2f} MB")
+    
+    print(f"Total execution time: {elapsed_time:.2f} seconds")
+    
+    if invalid_files:
+        print(f"List of invalid files saved to 'invalid_files_parquet_conversion.csv'")
+    
+    return True, f"Successfully combined {valid_files} CSV files into {output_file}"
+
+# --------------------------
+# Part 2: Spark Processing Functions
+# --------------------------
+
+def setup_environment(spark_home=None, java_home=None):
+    # Set environment variables to point to Spark/Java installations
+    if spark_home:
+        os.environ["SPARK_HOME"] = spark_home
+    if java_home:
+        os.environ["JAVA_HOME"] = java_home
+
+    # Add Spark's Python directory to sys.path if SPARK_HOME is set
+    if "SPARK_HOME" in os.environ:
+        spark_python = os.path.join(os.environ["SPARK_HOME"], "python")
+        if spark_python not in sys.path:
+            sys.path.insert(0, spark_python)
+
+        # Add the Py4J zip file to sys.path
+        py4j_search = os.path.join(spark_python, "lib", "py4j*-src.zip")
+        py4j_files = glob.glob(py4j_search)
+        if py4j_files:
+            py4j_zip = py4j_files[0]
+            if py4j_zip not in sys.path:
+                sys.path.insert(0, py4j_zip)
+        else:
+            print("Warning: Could not locate the Py4J zip file in", os.path.join(spark_python, "lib"))
+
+def create_spark_session(app_name="Stock Data Processing", warehouse_dir=None, cores=None, memory=None):
+    """
+    Create and configure a Spark session
+    
+    Args:
+        app_name (str): Name of the Spark application
+        warehouse_dir (str): Directory for Hive warehouse
+        cores (int): Number of cores to use
+        memory (str): Amount of memory to use
+        
+    Returns:
+        SparkSession: Configured Spark session
+    """
+    try:
+        from pyspark.sql import SparkSession
+        
+        # Set defaults if not provided
+        if cores is None:
+            cores = max(1, multiprocessing.cpu_count() - 1)
+        
+        if memory is None:
+            memory = "8g"
+            
+        # Create the session builder
+        builder = (
+            SparkSession.builder
+            .appName(app_name)
+            .master(f"local[{cores}]")
+            .config("spark.driver.memory", memory)
+            .config("spark.executor.memory", memory)
+            .config("spark.driver.memoryOverhead", "2g")
+            .config("spark.executor.memoryOverhead", "2g")
+            .config("spark.sql.shuffle.partitions", str(cores))
+            # Add parquet specific configurations
+            .config("spark.sql.parquet.int96RebaseModeInRead", "LEGACY")
+            .config("spark.sql.parquet.int96RebaseModeInWrite", "LEGACY")
+            .config("spark.sql.parquet.datetimeRebaseModeInRead", "LEGACY")
+            .config("spark.sql.parquet.datetimeRebaseModeInWrite", "LEGACY")
+        )
+        
+        # Add warehouse directory if provided
+        if warehouse_dir:
+            builder = builder.config("spark.sql.warehouse.dir", warehouse_dir)
+            
+        # Add Hive support
+        try:
+            builder = builder.enableHiveSupport()
+        except Exception as e:
+            print(f"Warning: Could not enable Hive support: {str(e)}")
+            
+        # Create the session
+        spark = builder.getOrCreate()
+        
+        return spark
+        
+    except ImportError:
+        print("Error: PySpark not found. Please install PySpark.")
+        sys.exit(1)
+
+def get_stock_schema():
+    """
+    Define explicit schema for the stock data to avoid inference issues
+    
+    Returns:
+        StructType: Schema for the stock data
+    """
+    from pyspark.sql.types import DateType, DoubleType, IntegerType, StringType, StructType, StructField
+    
+    return StructType([
+        StructField("Ticker", StringType(), False),
+        StructField("Volume", IntegerType(), True),
+        StructField("Dividends", DoubleType(), True),
+        StructField("Stock Splits", DoubleType(), True),
+        StructField("Capital Gains", DoubleType(), True),
+        StructField("Close", DoubleType(), True),
+        StructField("Date", StringType(), True),  # Keep as string initially
+        StructField("Low", DoubleType(), True),
+        StructField("Open", DoubleType(), True),
+        StructField("High", DoubleType(), True),
+        StructField("SourceFile", StringType(), True)
+    ])
+
+def process_stock_data_from_parquet(spark, parquet_path, temp_dir=None):
+    """
+    Process stock data from parquet file
+    
+    Args:
+        spark (SparkSession): Spark session
+        parquet_path (str): Path to parquet file
+        temp_dir (str): Directory for temporary files
+        
+    Returns:
+        DataFrame: Processed stock data
+    """
+    from pyspark.sql.functions import col, to_date
+    
+    # Get the absolute path for better error messages
+    abs_parquet_path = os.path.abspath(parquet_path)
+    print(f"Reading parquet file: {abs_parquet_path}")
+    
+    if not os.path.exists(parquet_path):
+        print(f"ERROR: Parquet file not found at {abs_parquet_path}")
+        print(f"Files in current directory: {os.listdir(os.getcwd())}")
+        raise FileNotFoundError(f"Parquet file not found: {parquet_path}")
+    
+    start_time = time.time()
+    
+    # First, try reading with pandas to convert the file to a format Spark can handle
+    try:
+        print("Using pandas to convert timestamps before loading into Spark")
+        
+        # Read the file with pandas
+        pdf = pd.read_parquet(parquet_path)
+        
+        # Convert timestamp column to string
+        if 'Date' in pdf.columns and pd.api.types.is_datetime64_any_dtype(pdf['Date']):
+            print("Converting Date from timestamp to string format")
+            pdf['Date'] = pdf['Date'].dt.strftime('%Y-%m-%d')
+        
+        # Save as a temporary file that Spark can read
+        if temp_dir:
+            os.makedirs(temp_dir, exist_ok=True)
+            temp_parquet = os.path.join(temp_dir, "temp_spark_compatible.parquet")
+        else:
+            temp_parquet = "temp_spark_compatible.parquet"
+            
+        pdf.to_parquet(temp_parquet, index=False)
+        
+        # Now read the temporary file with Spark
+        all_stocks_df = spark.read.parquet(temp_parquet)
+        
+        # Convert string date to date type
+        all_stocks_df = all_stocks_df.withColumn("Date", to_date(col("Date"), "yyyy-MM-dd"))
+    except Exception as e:
+        print(f"Pandas conversion failed: {str(e)}. Trying direct Spark read...")
+        
+        try:
+            # Try direct read with schema
+            schema = get_stock_schema()
+            all_stocks_df = spark.read.schema(schema).parquet(parquet_path)
+            
+            # Convert string date to date type
+            all_stocks_df = all_stocks_df.withColumn("Date", to_date(col("Date"), "yyyy-MM-dd"))
+        except Exception as e2:
+            print(f"Schema-based read failed: {str(e2)}. Trying without schema...")
+            
+            # Last resort: try reading without schema
+            all_stocks_df = spark.read.parquet(parquet_path)
+    
+    read_time = time.time() - start_time
+    print(f"Parquet file read in {read_time:.2f} seconds")
+    
+    # Standardize column names (lowercase for consistency)
+    for column in all_stocks_df.columns:
+        all_stocks_df = all_stocks_df.withColumnRenamed(column, column.lower())
+    
+    # Print the schema of the dataframe
+    print("Schema of parquet stock data:")
+    all_stocks_df.printSchema()
+    
+    # Print row count
+    row_count = all_stocks_df.count()
+    print(f"Total rows in parquet file: {row_count:,}")
+    
+    return all_stocks_df
+
+def enrich_with_sector_info(spark, all_stocks_df):
+    """
+    Enrich stock data with sector information
+    
+    Args:
+        spark (SparkSession): Spark session
+        all_stocks_df (DataFrame): Stock data DataFrame
+        
+    Returns:
+        DataFrame: Enriched stock data
+    """
+    # Check if the bronze_stocks_info table exists
+    try:
+        # Get the stock information dataframe with sectors
+        stocks_info_df = spark.table("bronze_stocks_info").select("symbol", "sector")
+        
+        # Join with the stock info to get sectors
+        from pyspark.sql.functions import col
+        
+        enriched_stocks_df = all_stocks_df.join(
+            stocks_info_df,
+            all_stocks_df["ticker"] == stocks_info_df["symbol"],
+            "left"
+        )
+        
+        # Drop the redundant symbol column
+        enriched_stocks_df = enriched_stocks_df.drop("symbol")
+        
+        # Check for null sectors and print statistics
+        null_sectors = enriched_stocks_df.filter(col("sector").isNull()).count()
+        total_rows = enriched_stocks_df.count()
+        print(f"Total rows after joining: {total_rows:,}")
+        print(f"Rows with null sectors: {null_sectors:,} ({(null_sectors/total_rows)*100:.2f}%)")
+        
+        # Show a few sample rows with null sectors if any
+        if null_sectors > 0:
+            print("Sample tickers with missing sector information:")
+            enriched_stocks_df.filter(col("sector").isNull()).select("ticker").distinct().show(10)
+        
+        return enriched_stocks_df
+    except Exception as e:
+        print(f"Warning: Could not enrich with sector information: {str(e)}")
+        print("Proceeding with unmodified dataframe")
+        return all_stocks_df
+
+def calculate_moving_averages(spark, stocks_df, ema_periods=[20, 50, 200], sma_periods=[20, 50, 200]):
+    """
+    Calculate Exponential Moving Average (EMA) and Simple Moving Average (SMA)
+    for each ticker in the stock data.
+    
+    Creates column names in the format SMA_XX and EMA_XX to match existing silver_stocks table.
+    
+    Args:
+        spark (SparkSession): Spark session
+        stocks_df (DataFrame): Stock data DataFrame
+        ema_periods (list): List of periods for EMA calculation
+        sma_periods (list): List of periods for SMA calculation
+        
+    Returns:
+        DataFrame: Stock data with added EMA and SMA columns
+    """
+    # Import necessary Spark SQL functions
+    from pyspark.sql.window import Window
+    from pyspark.sql.functions import avg, lag, col, expr, when, lit
+    
+    print("Calculating moving averages for each ticker...")
+    
+    # Create a temporary view for easier manipulation with SQL
+    stocks_df.createOrReplaceTempView("stocks_temp")
+    
+    # Ensure the DataFrame is properly partitioned by ticker and ordered by date
+    # This is critical for correct window function calculations
+    stocks_df = spark.sql("""
+        SELECT *,
+               ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date) as row_num
+        FROM stocks_temp
+    """)
+    
+    # Calculate SMA for each specified period
+    for period in sma_periods:
+        print(f"Calculating SMA_{period}...")
+        
+        # Define the window specification: partition by ticker, order by date
+        window_spec = Window.partitionBy("ticker").orderBy("date").rowsBetween(-(period-1), 0)
+        
+        # Calculate SMA using the window function
+        # Use uppercase with underscore format (SMA_XX) to match silver_stocks
+        sma_col_name = f"SMA_{period}"
+        stocks_df = stocks_df.withColumn(sma_col_name, avg("close").over(window_spec))
+    
+    # Calculate EMA for each specified period using the DataFrame API instead of SQL
+    for period in ema_periods:
+        print(f"Calculating EMA_{period}...")
+        
+        alpha = 2.0 / (period + 1.0)
+        
+        # Create window specs for calculations
+        window_spec = Window.partitionBy("ticker").orderBy("date")
+        window_spec_rows = Window.partitionBy("ticker").orderBy("date").rowsBetween(-(period-1), 0)
+        
+        # First, calculate SMA for the initial values
+        sma_col = avg("close").over(window_spec_rows)
+        
+        # Use temp column name that won't conflict
+        temp_col_name = f"ema_{period}_temp"
+        
+        # Use the temp column format during calculation
+        stocks_df = stocks_df.withColumn(temp_col_name, sma_col)
+        
+        # Iteratively calculate EMA using DataFrame operations
+        # This approach avoids the recursive CTE which was causing the issue
+        for i in range(5):  # Multiple passes to propagate values (usually 3-5 is enough)
+            prev_col_name = f"prev_ema_{period}"
+            
+            stocks_df = stocks_df.withColumn(
+                prev_col_name, 
+                lag(temp_col_name, 1).over(window_spec)
+            )
+            
+            # When it's the first row for a ticker, use close as initial value
+            # For other rows, apply EMA formula
+            stocks_df = stocks_df.withColumn(
+                temp_col_name,
+                when(
+                    col("row_num") == 1, 
+                    col("close")
+                ).otherwise(
+                    when(
+                        col(prev_col_name).isNull(),
+                        col("close")  # Use close if prev_ema is null
+                    ).otherwise(
+                        col("close") * lit(alpha) + col(prev_col_name) * lit(1 - alpha)
+                    )
+                )
+            )
+            
+            # Drop the previous column to avoid column name conflicts in next iteration
+            stocks_df = stocks_df.drop(prev_col_name)
+        
+        # Rename the final column to the intended name matching silver_stocks (EMA_XX)
+        # and drop temporary column
+        final_col_name = f"EMA_{period}"
+        stocks_df = stocks_df.withColumn(final_col_name, col(temp_col_name))
+        stocks_df = stocks_df.drop(temp_col_name)
+        
+    # Drop the temporary row_num column
+    stocks_df = stocks_df.drop("row_num")
+    
+    # Show a sample of the data with the new columns
+    print("\nSample data with SMA and EMA columns:")
+    sample_columns = ["ticker", "date", "close"] + \
+                     [f"SMA_{p}" for p in sma_periods] + \
+                     [f"EMA_{p}" for p in ema_periods]
+    stocks_df.select(sample_columns).orderBy("ticker", "date").show(5)
+    
+    return stocks_df
+
+def update_silver_table(spark, enriched_df, table_name="silver_stocks_updated", warehouse_path=None):
+    """
+    Update or create silver table with processed data
+    
+    Args:
+        spark (SparkSession): Spark session
+        enriched_df (DataFrame): Enriched stock data
+        table_name (str): Name of the table to create
+        warehouse_path (str): Path to the Hive warehouse
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        # Calculate moving averages (EMA and SMA) before loading into the table
+        print("Calculating technical indicators before loading into the silver table...")
+        enriched_df = calculate_moving_averages(
+            spark, 
+            enriched_df,
+            ema_periods=[9, 20, 50, 200],  # Common EMA periods
+            sma_periods=[20, 50, 200]       # Common SMA periods
+        )
+        
+        # Try to manually clean up the location first if warehouse_path is provided
+        if warehouse_path:
+            try:
+                full_path = os.path.join(warehouse_path, f"stocks_db.db/{table_name}")
+                if os.path.exists(full_path):
+                    import shutil
+                    print(f"Manually removing directory: {full_path}")
+                    shutil.rmtree(full_path)
+            except Exception as e:
+                print(f"Warning: Could not remove directory: {str(e)}")
+        
+        # Drop the existing table if it exists
+        print(f"Dropping existing {table_name} table if it exists")
+        spark.sql(f"DROP TABLE IF EXISTS {table_name}")
+        
+        # Create the new table from the dataframe with OVERWRITE mode to force replacement
+        print(f"Creating new {table_name} table with overwrite mode")
+        enriched_df.write.mode("overwrite").saveAsTable(table_name)
+        
+        # Verify the new table
+        new_count = spark.table(table_name).count()
+        print(f"{table_name} table created with {new_count:,} rows")
+        
+        # Show the schema of the new table
+        print(f"Schema of the new {table_name} table:")
+        spark.table(table_name).printSchema()
+        
+        return True
+    except Exception as e:
+        print(f"Error updating silver table: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+# --------------------------
+# Part 2: Spark Processing Functions
+# --------------------------
+
+def run_pipeline(mode="all", csv_folder="ticker_data", output_parquet="combined_stock_data.parquet", 
+              batch_size=100, use_writer=True, spark_home=None, java_home=None,
+              warehouse_dir="/home/ricardo/hive/warehouse", cores=None, memory="8g",
+              app_name="Unified Stock Data Pipeline", silver_table="silver_stocks_updated",
+              temp_dir="temp", use_db="stocks_db"):
+    # Create a namespace object to mimic parsed arguments
+    class Args:
+        pass
+    
+    args = Args()
+    
+    # Set attributes on the args object
+    args.mode = mode
+    args.csv_folder = csv_folder
+    args.output_parquet = output_parquet
+    args.batch_size = batch_size
+    args.use_legacy = not use_writer
+    args.spark_home = spark_home
+    args.java_home = java_home
+    args.warehouse_dir = warehouse_dir
+    args.cores = cores
+    args.memory = memory
+    args.app_name = app_name
+    args.silver_table = silver_table
+    args.temp_dir = temp_dir
+    args.use_db = use_db
+    
+    # Create temp directory if needed
+    if args.temp_dir:
+        os.makedirs(args.temp_dir, exist_ok=True)
+    
+    # Part 1: Convert CSVs to Parquet
+    if args.mode in ["convert", "all"]:
+        print("\n" + "="*80)
+        print("PART 1: CONVERTING CSV FILES TO PARQUET")
+        print("="*80)
+        
+        success, message = combine_csv_to_parquet(
+            args.csv_folder, 
+            args.output_parquet, 
+            args.batch_size, 
+            use_writer=not args.use_legacy
+        )
+        
+        if not success:
+            print(f"ERROR: {message}")
+            return 1
+        
+        # Verify the parquet file
+        print("\nVerifying parquet file...")
+        try:
+            df = pd.read_parquet(args.output_parquet)
+            print(f"Verification successful. Parquet file contains {len(df)} rows.")
+            print("\nSample data:")
+            print(df.head())
+        except Exception as e:
+            print(f"Verification failed: {str(e)}")
+            return 1
+    
+    # Part 2: Process Parquet with Spark
+    if args.mode in ["process", "all"]:
+        print("\n" + "="*80)
+        print("PART 2: PROCESSING PARQUET FILE WITH SPARK")
+        print("="*80)
+        
+        # Setup environment and create Spark session
+        setup_environment(args.spark_home, args.java_home)
+        
+        try:
+            spark = create_spark_session(
+                app_name=args.app_name,
+                warehouse_dir=args.warehouse_dir,
+                cores=args.cores,
+                memory=args.memory
+            )
+            
+            # Set the active database if provided
+            if args.use_db:
+                try:
+                    # Create the database if it doesn't exist
+                    spark.sql(f"CREATE DATABASE IF NOT EXISTS {args.use_db}")
+                    spark.sql(f"USE {args.use_db}")
+                    print(f"Using database: {args.use_db}")
+                except Exception as e:
+                    print(f"Warning: Could not set database {args.use_db}: {str(e)}")
+            
+            # Process stock data from the parquet file
+            start_time = time.time()
+            all_stocks_df = process_stock_data_from_parquet(
+                spark, 
+                args.output_parquet, 
+                args.temp_dir
+            )
+            
+            # Try to enrich with sector information if available
+            enriched_stocks_df = enrich_with_sector_info(spark, all_stocks_df)
+            
+            processing_time = time.time() - start_time
+            print(f"Data processing completed in {processing_time:.2f} seconds")
+            
+            # Update the silver table
+            table_start_time = time.time()
+            success = update_silver_table(
+                spark, 
+                enriched_stocks_df,
+                args.silver_table,
+                args.warehouse_dir
+            )
+            
+            table_time = time.time() - table_start_time
+            print(f"Table update completed in {table_time:.2f} seconds")
+            
+            # Print total execution time
+            total_time = time.time() - start_time
+            print(f"\nTotal Spark processing time: {total_time:.2f} seconds")
+            
+            # Cleanup
+            try:
+                if args.temp_dir and os.path.exists(os.path.join(args.temp_dir, "temp_spark_compatible.parquet")):
+                    os.remove(os.path.join(args.temp_dir, "temp_spark_compatible.parquet"))
+                    print(f"Cleaned up temporary files in {args.temp_dir}")
+            except Exception as e:
+                print(f"Warning: Could not clean up temporary files: {str(e)}")
+            
+            return 0 if success else 1
+            
+        except Exception as e:
+            print(f"Error in Spark processing: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return 1
+    
+    return 0
+
+#      _ _                      _             _                _               
+#     (_) |                    | |           | |              (_)              
+#  ___ _| |_   _____ _ __   ___| |_ ___   ___| | _____  __   ___  _____      __
+# / __| | \ \ / / _ \ '__| / __| __/ _ \ / __| |/ / __| \ \ / / |/ _ \ \ /\ / /
+# \__ \ | |\ V /  __/ |    \__ \ || (_) | (__|   <\__ \  \ V /| |  __/\ V  V / 
+# |___/_|_| \_/ \___|_|    |___/\__\___/ \___|_|\_\___/   \_/ |_|\___| \_/\_/  
+
+def create_spark_session():
+    spark = (
+        SparkSession.builder
+        .appName("Create Silver Stocks View")
+        .master("local[6]")
+        .config("spark.driver.memory", "8g")
+        .config("spark.executor.memory", "8g")
+        .config("spark.driver.memoryOverhead", "2g")
+        .config("spark.executor.memoryOverhead", "2g")
+        .config("spark.sql.shuffle.partitions", "10")
+        .config("spark.sql.warehouse.dir", "/home/ricardo/hive/warehouse")
+        .enableHiveSupport()
+        .getOrCreate()
+    )
+    
+    # Set the active database to stocks_db
+    spark.sql("USE stocks_db")
+    
+    return spark
+
+# ---------------------------
+# Create View
+# ---------------------------
+def create_silver_stocks_view(spark):
+    # Check if both tables exist
+    tables = spark.sql("SHOW TABLES").collect()
+    table_names = [table['tableName'] for table in tables]
+    
+    if "silver_stocks_updated" not in table_names:
+        print("Error: silver_stocks_updated table not found.")
+        return
+    
+    if "silver_stocks" not in table_names:
+        print("Error: silver_stocks table not found.")
+        return
+    
+    # Drop the views if they already exist
+    print("Dropping the views if they exist...")
+    spark.sql("DROP VIEW IF EXISTS silver_stocks_view")
+    
+    try:
+        # Print schemas to debug
+        print("\nSchema of silver_stocks_updated:")
+        spark.table("silver_stocks_updated").printSchema()
+        
+        print("\nSchema of silver_stocks:")
+        spark.table("silver_stocks").printSchema()
+        
+        print("\nCreating view with direct SQL...")
+        
+        # Create the view directly using SQL
+        # Fixed SQL with the same number of columns in both UNION parts
+        spark.sql("""
+        CREATE OR REPLACE VIEW silver_stocks_view AS
+        SELECT 
+            t.Date, t.Close, t.Dividends, t.High, t.Low, t.Open, 
+            t.`Stock Splits`, t.Volume, t.Ticker, t.`Daily Return`, 
+            t.`Cumulative Return`, t.SMA_20, t.EMA_20, t.Sector
+        FROM
+        (
+            -- First table with missing columns added as NULL
+            SELECT 
+                CAST(date AS DATE) AS Date, 
+                close AS Close, 
+                CAST(dividends AS STRING) AS Dividends,
+                high AS High, 
+                low AS Low, 
+                open AS Open, 
+                CAST(`stock splits` AS STRING) AS `Stock Splits`,
+                volume AS Volume, 
+                ticker AS Ticker, 
+                NULL AS `Daily Return`,  -- Added NULL for missing column
+                NULL AS `Cumulative Return`,  -- Added NULL for missing column
+                SMA_20, 
+                EMA_20, 
+                sector AS Sector
+            FROM silver_stocks_updated
+            
+            UNION ALL
+            
+            -- Second table with columns already aligned
+            SELECT 
+                CAST(Date AS DATE) AS Date, 
+                Close, 
+                Dividends,
+                High, 
+                Low, 
+                Open, 
+                `Stock Splits`,
+                Volume, 
+                Ticker, 
+                `Daily Return`,
+                `Cumulative Return`, 
+                SMA_20, 
+                EMA_20, 
+                Sector
+            FROM silver_stocks
+        ) t
+        -- Remove duplicates by grouping
+        GROUP BY 
+            t.Date, t.Close, t.Dividends, t.High, t.Low, t.Open, 
+            t.`Stock Splits`, t.Volume, t.Ticker, t.`Daily Return`, 
+            t.`Cumulative Return`, t.SMA_20, t.EMA_20, t.Sector
+        """)
+        
+        # Verify the view was created
+        print("\nVerifying view creation...")
+        views = spark.sql("SHOW VIEWS").collect()
+        print("Available views:")
+        # Get the correct column name from the result
+        if views:
+            column_names = views[0].asDict().keys()
+            name_col = next((col for col in column_names if 'name' in col.lower()), None)
+            if name_col:
+                for view in views:
+                    print(f"- {view[name_col]}")
+            else:
+                print("- Column structure:", list(column_names))
+                print("- First view data:", views[0])
+        else:
+            print("No views found")
+        
+        # Show the schema of the view
+        print("\nSchema of the new view:")
+        spark.sql("DESCRIBE silver_stocks_view").show()
+        
+        # Check for duplicate Ticker-Date combinations
+        duplicate_check_sql = """
+        SELECT Ticker, Date, COUNT(*) as count
+        FROM silver_stocks_view
+        GROUP BY Ticker, Date
+        HAVING COUNT(*) > 1
+        """
+        duplicates = spark.sql(duplicate_check_sql).count()
+        print(f"\nNumber of duplicate Ticker-Date combinations: {duplicates} (should be 0)")
+        
+        # Count rows in the view
+        row_count = spark.sql("SELECT COUNT(*) AS count FROM silver_stocks_view").collect()[0]['count']
+        print(f"\nNumber of rows in the view: {row_count}")
+        
+        # Show a sample of the view
+        print("\nSample data from the view:")
+        spark.sql("SELECT * FROM silver_stocks_view LIMIT 5").show()
+        
+    except Exception as e:
+        print(f"Error creating view: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
+def create_gold_sector_summary(spark):
+    try:
+        # Read the silver_stocks table and aggregate data by sector
+        silver_df = spark.table("silver_stocks_view")
+        sector_df = silver_df.groupBy("Sector") \
+            .agg(
+                countDistinct("Ticker").alias("UniqueTickers"),
+                count("*").alias("TotalRecords")
+            ) \
+            .orderBy(col("TotalRecords").desc())
+        
+        # Drop table if exists and save the new gold table
+        spark.sql("DROP TABLE IF EXISTS gold_sector_summary")
+        print("Saving sector summary into gold_sector_summary...")
+        sector_df.write.mode("overwrite").saveAsTable("gold_sector_summary")
+        print("gold_sector_summary created successfully.")
+    except Exception as e:
+        print("Error creating gold_sector_summary:", e)
+        raise
+
+# ---------------------------
+# Main Execution
+# ---------------------------
+def main():
+    extractor()
+    
+    run_pipeline()
+    
+    setup_environment()
+    
+    spark = create_spark_session()
+    
+    create_silver_stocks_view(spark)
+    
+    create_gold_sector_summary(spark)
+
+    spark.stop()
+
+if __name__ == "__main__":
+    main()
