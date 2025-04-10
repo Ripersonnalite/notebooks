@@ -341,7 +341,7 @@ def get_ticker_column(csv_path="total_tickers.csv"):
 def fetch_yfinance_data(
     tickers,
     start_date: str = "2025-01-01",
-    end_date: str = "2025-04-01",
+    end_date: str = "2025-04-10",
     file_name: Optional[str] = None
 ):
     total_tickers = len(tickers)
@@ -441,7 +441,7 @@ def extract_ticker(text):
         return match.group(0)
     return None
 
-def run_fetch(ticker_file, top_10_only=False):
+def run_fetch_(ticker_file, top_10_only=False):
     """Run fetching process for a specific ticker file."""
     # Get tickers from the file
     tickers = get_ticker_column(ticker_file)
@@ -477,7 +477,24 @@ def run_fetch(ticker_file, top_10_only=False):
     # Fetch the data for the tickers
     return fetch_yfinance_data(tickers_to_fetch, file_name=server_id)
 
-def run_parallel():
+def run_fetch(ticker_file, top_10_only=False):
+    """Run fetching process for a specific ticker file."""
+    # Get tickers from the file
+    tickers = get_ticker_column(ticker_file)
+    
+    # Limit to top 10 tickers if toggle is on
+    if top_10_only:
+        tickers = tickers[:10]
+    
+    print(f"Will fetch all {len(tickers)} tickers")
+    
+    # Extract server identifier from filename
+    server_id = extract_ticker(ticker_file)
+    
+    # Fetch the data for the tickers
+    return fetch_yfinance_data(tickers, file_name=server_id)
+
+def run_parallel_extraction():
     """Run fetching in parallel across multiple servers."""
     with concurrent.futures.ThreadPoolExecutor() as executor:
         # Submit six tasks to the executor
@@ -1931,36 +1948,9 @@ def saving_good_tickers():
         print(f"Extracted {len(good_tickers)} good tickers and saved to {csv_path}")
         remove_duplicate_tickers("good_tickers.csv")
 
-def extractor():
-    """Main execution function."""
-    start_time = time.time()
-    try:
-        # Run parallel tasks
-        run_parallel()
-        
-        # Check the data
-        check_tickers()
-        
-        # Cleaning good tickers
-        saving_good_tickers()
-        
-        # Run the fix for problematic
-        fix_all_problematic_tickers()
-        
-
-
-    except Exception as e:
-        print(f"Error in main execution: {e}")
-    finally:
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        print(f"\nTotal execution time: {elapsed_time:.2f} seconds")
-
-
 # --------------------------
 # Part 1: CSV to Parquet Conversion Functions
 # --------------------------
-
 
 def read_csv_file(file_path):
     """
@@ -2146,7 +2136,11 @@ def combine_to_parquet_with_writer(csv_files, output_file, all_columns, batch_si
     
     return valid_files, invalid_files, total_rows
 
-def combine_csv_to_parquet(folder_path, output_file, batch_size=100, use_writer=True):
+def combine_csv_to_parquet(
+        folder_path="./ticker_data", 
+        output_file="combined_stock_data.parquet", 
+        batch_size=100, 
+        use_writer=True):
     """
     Combine multiple CSV files into a single parquet file.
     
@@ -2699,7 +2693,6 @@ def run_pipeline(parquet_path="combined_stock_data.parquet",
                  temp_csv="temp_stocks_data.csv"):
     """Main function to reload the parquet file via CSV to the silver table"""
     start_time = time.time()
-    
     print(f"Starting reload of parquet via CSV to {table_name} table...")
     
     # Step 1: Convert parquet to CSV using pandas
@@ -2938,23 +2931,59 @@ def create_gold_sector_summary(spark):
         print("Error creating gold_sector_summary:", e)
         raise
 
+import subprocess
+import getpass
+
+def restart_service(service_name):
+    """
+    Restart a systemd service with sudo privileges.
+    
+    Args:
+        service_name (str): The name of the service to restart
+        
+    Returns:
+        tuple: (success, output) where success is a boolean indicating if the command
+               was successful, and output contains stdout or stderr
+    """
+    try:
+        password = getpass.getpass("Enter sudo password: ")
+        cmd = f"sudo -S systemctl restart {service_name}"
+        
+        process = subprocess.Popen(
+            cmd, 
+            shell=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        stdout, stderr = process.communicate(input=password + "\n")
+        
+        if process.returncode == 0:
+            return True, stdout
+        else:
+            return False, stderr
+            
+    except Exception as e:
+        return False, str(e)
+
 # ---------------------------
 # Main Execution
 # ---------------------------
 def main():
-    extractor()
-    
+    run_parallel_extraction()
+    check_tickers()
+    saving_good_tickers()
+    fix_all_problematic_tickers()
+    combine_csv_to_parquet()
     run_pipeline()
-    
     setup_environment()
-    
     spark = create_spark_session()
-    
     create_silver_stocks_view(spark)
-    
     create_gold_sector_summary(spark)
-
     spark.stop()
+    restart_service("streamlit-stocks.service")
 
 if __name__ == "__main__":
     main()
