@@ -1,0 +1,1192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Abstract Data Carousel</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+            background: radial-gradient(ellipse at center top, #1a3a5c 0%, #0d1f2f 50%, #050a15 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+        
+        .page-container {
+            width: 100%;
+            max-width: 900px;
+            height: 100vh;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .bg-grid {
+            position: absolute;
+            width: 150%;
+            height: 150%;
+            background-image: 
+                linear-gradient(rgba(0, 212, 255, 0.02) 2px, transparent 2px),
+                linear-gradient(90deg, rgba(0, 212, 255, 0.02) 2px, transparent 2px);
+            background-size: 60px 60px;
+            animation: gridFloat 30s linear infinite;
+            transform: rotate(-15deg);
+        }
+        
+        @keyframes gridFloat {
+            0% { transform: translate(-60px, -60px) rotate(-15deg); }
+            100% { transform: translate(0, 0) rotate(-15deg); }
+        }
+        
+		.carousel-container {
+					position: absolute;
+					width: 400px;
+					height: 400px;
+					top: 30%;
+					left: 50%;
+					transform: translate(-50%, -50%);
+				}
+        
+        .carousel-ring {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            border: 3px solid rgba(255, 255, 255, 0.1);
+            border-radius: 50%;
+            box-shadow: 
+                0 0 50px rgba(0, 212, 255, 0.3),
+                inset 0 0 50px rgba(74, 158, 255, 0.2);
+        }
+        
+        .orbital-wrapper {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            animation: orbitRotate 30s linear infinite;
+            transition: none;
+        }
+        
+        .orbital-wrapper.dragging {
+            animation-play-state: paused !important;
+            cursor: grabbing !important;
+        }
+        
+        @keyframes orbitRotate {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Single unified segment style for all boxes */
+        .carousel-segment {
+			position: absolute;
+			width: 80px;
+			height: 80px;
+			border-radius: 50%;
+			background: rgba(255, 255, 255, 0.05);
+			backdrop-filter: blur(10px);
+			border: 1px solid rgba(255, 255, 255, 0.1);
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			/* MODIFICATION: Changed back to visible to allow the satellite to be seen outside */
+			overflow: visible; 
+			cursor: grab;
+			transition: all 0.3s ease;
+			user-select: none;
+			-webkit-user-select: none;
+			-moz-user-select: none;
+			-ms-user-select: none;
+		}
+        
+        /* MODIFICATION: Added a new clipper div to contain the internal animations */
+        .viz-clipper {
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            overflow: hidden;
+            position: absolute;
+            top: 0;
+            left: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .carousel-segment:active {
+            cursor: grabbing;
+        }
+        
+        .carousel-segment:hover {
+            background: rgba(255, 255, 255, 0.08);
+            border-color: rgba(0, 212, 255, 0.3);
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.4);
+        }
+        
+        .carousel-segment.no-link {
+            cursor: grab;
+        }
+        
+        .carousel-segment.dragging {
+            cursor: grabbing !important;
+            background: rgba(255, 255, 255, 0.1) !important;
+            border-color: rgba(0, 212, 255, 0.5) !important;
+            box-shadow: 0 0 30px rgba(0, 212, 255, 0.6) !important;
+        }
+        
+        .segment-inner {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            animation: counterRotate 30s linear infinite;
+            position: relative; 
+        }
+        
+        .orbital-wrapper.dragging .segment-inner {
+            animation-play-state: paused !important;
+        }
+        
+        @keyframes counterRotate {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(-360deg); }
+        }
+        
+        .segment-link {
+            text-decoration: none;
+            color: inherit;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .segment-title {
+            position: absolute;
+            top: 10px;
+            font-size: 11px;
+            color: rgba(255,255,255,0.7);
+            letter-spacing: 1px;
+            text-align: center;
+            width: 100%;
+            z-index: 2; /* Ensure title is on top of viz */
+        }
+        
+        .mini-chart {
+            width: 90%;
+            height: 90%;
+            position: relative;
+            margin-top: 20px;
+        }
+        
+        .bar-viz {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-around;
+            height: 100%;
+            padding: 10px;
+        }
+        
+        .bar {
+            width: 15px;
+            background: linear-gradient(180deg, #00d4ff, #0066cc);
+            border-radius: 3px 3px 0 0;
+            animation: barGrow 3s ease-in-out infinite;
+        }
+        
+        @keyframes barGrow {
+            0%, 100% { height: 40%; }
+            50% { height: 80%; }
+        }
+        
+        .line-viz {
+            width: 100%;
+            height: 100%;
+        }
+        
+        .wave-path {
+            stroke: #00ff88;
+            stroke-width: 2;
+            fill: none;
+            animation: waveDraw 4s ease-in-out infinite;
+        }
+        
+        @keyframes waveDraw {
+            0% { stroke-dasharray: 0 300; }
+            100% { stroke-dasharray: 300 0; }
+        }
+        
+        .pie-viz {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            background: conic-gradient(
+                #4a9eff 0deg 72deg,
+                #00d4ff 72deg 144deg,
+                #00ff88 144deg 216deg,
+                #ff9e3d 216deg 288deg,
+                #ff4444 288deg 360deg
+            );
+            animation: rotate 10s linear infinite;
+        }
+        
+        @keyframes rotate {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+
+        .powerbi-orbit-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            animation: orbit-pbi 8s linear infinite;
+            pointer-events: none; 
+        }
+
+        .powerbi-orbiter {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 30px;
+            height: 30px;
+            background: rgba(255, 240, 100, 0.1);
+            border: 1px solid rgba(255, 200, 0, 0.4);
+            border-radius: 50%;
+            transform: translate(-50%, -60px); 
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(5px);
+        }
+
+        .powerbi-orbiter svg {
+            animation: counter-orbit-pbi 8s linear infinite;
+        }
+        
+        @keyframes orbit-pbi {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(-360deg); } 
+        }
+
+        @keyframes counter-orbit-pbi {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); } 
+        }
+        
+        .center-core {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 180px;
+            height: 180px;
+            background: radial-gradient(circle, rgba(0, 212, 255, 0.2), transparent 70%);
+            border-radius: 50%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            animation: pulse 3s ease-in-out infinite;
+            z-index: 10;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { transform: translate(-50%, -50%) scale(1); }
+            50% { transform: translate(-50%, -50%) scale(1.1); }
+        }
+        
+        .core-value {
+            font-size: 28px;
+            font-weight: 100;
+            color: #00d4ff;
+            text-shadow: 0 0 20px rgba(0, 212, 255, 0.8);
+        }
+        
+        .core-label {
+            font-size: 10px;
+            letter-spacing: 3px;
+            color: rgba(255, 255, 255, 0.5);
+            margin-top: 10px;
+        }
+        
+        .mini-bars {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            height: 60px;
+            margin-top: 20px;
+            width: 80%;
+        }
+        
+        .mini-bar {
+            width: 8px;
+            background: linear-gradient(180deg, #00ff88, #00aa55);
+            border-radius: 2px;
+        }
+        
+        .orbit-dot {
+            position: absolute;
+            width: 6px;
+            height: 6px;
+            background: white;
+            border-radius: 50%;
+            box-shadow: 0 0 10px rgba(255, 255, 255, 0.8);
+        }
+        
+        .orbit-container {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            animation: rotate 15s linear infinite;
+        }
+        
+        .orbit-container2 {
+            animation: rotate 20s linear infinite reverse;
+        }
+        
+        .orbit-container3 {
+            animation: rotate 25s linear infinite;
+        }
+        
+        .flow-line {
+            position: absolute;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, #00d4ff, transparent);
+            animation: flowLine 3s ease-in-out infinite;
+        }
+        
+        @keyframes flowLine {
+            0%, 100% { opacity: 0; transform: translateX(-50px); }
+            50% { opacity: 1; transform: translateX(50px); }
+        }
+        
+        @keyframes grabPulse {
+            0%, 100% { 
+                transform: translateX(-50%) scale(1);
+                opacity: 0.8;
+            }
+            50% { 
+                transform: translateX(-50%) scale(1.2);
+                opacity: 1;
+            }
+        }
+        
+        .grab-me-segment {
+			border: 2px solid rgba(0, 255, 136, 0.3) !important;
+			border-radius: 50%;
+			animation: grabGlow 3s ease-in-out infinite !important;
+		}
+        
+        @keyframes grabGlow {
+            0%, 100% {
+                box-shadow: 
+                    0 0 20px rgba(0, 212, 255, 0.4),
+                    0 0 40px rgba(0, 255, 136, 0.2);
+            }
+            50% {
+                box-shadow: 
+                    0 0 30px rgba(0, 212, 255, 0.6),
+                    0 0 60px rgba(0, 255, 136, 0.4),
+                    inset 0 0 20px rgba(0, 255, 136, 0.1);
+            }
+        }
+        
+        .grab-indicator {
+            position: absolute;
+            bottom: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 24px;
+            color: #00ff88;
+            animation: grabPulse 2s ease-in-out infinite;
+            filter: drop-shadow(0 0 10px rgba(0, 255, 136, 0.8));
+            cursor: grab;
+        }
+        
+        .language-toggle {
+            position: absolute;
+            bottom: -50px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 8px;
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            padding: 4px;
+            border-radius: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .lang-btn {
+            background: transparent;
+            border: none;
+            color: rgba(255, 255, 255, 0.5);
+            padding: 6px 12px;
+            border-radius: 16px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .lang-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+            color: rgba(255, 255, 255, 0.8);
+        }
+        
+        .lang-btn.active {
+            background: rgba(0, 212, 255, 0.2);
+            color: #00d4ff;
+            box-shadow: 0 0 10px rgba(0, 212, 255, 0.3);
+        }
+        
+        .attribution {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(255, 255, 255, 0.03);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 12px 25px;
+            font-size: 11px;
+            color: rgba(160, 196, 228, 0.7);
+            letter-spacing: 1px;
+        }
+		/* This rule specifically targets the new satellite */
+		.center-core .powerbi-orbiter {
+			 transform: translate(-50%, -100px);
+		}
+		
+    </style>
+</head>
+<body>
+    <div class="page-container">
+        <div class="bg-grid"></div>
+        
+        <div class="carousel-container">
+            <div class="carousel-ring"></div>
+            
+            <div class="orbit-container">
+                <div class="orbit-dot" style="top: 0; left: 50%; transform: translateX(-50%);"></div>
+            </div>
+            <div class="orbit-container orbit-container2">
+                <div class="orbit-dot" style="bottom: 0; left: 50%; transform: translateX(-50%);"></div>
+            </div>
+            <div class="orbit-container orbit-container3">
+                <div class="orbit-dot" style="top: 50%; right: 0; transform: translateY(-50%);"></div>
+            </div>
+            
+            <div class="orbital-wrapper" id="orbitalWrapper"></div>
+            
+            <div class="center-core" id="centerCore">
+                <a href="https://app.powerbi.com/view?r=eyJrIjoiMWM1ZjAwZDAtZDgyOS00MzI1LWFmZmUtNTk1OGM1MDI0OGNlIiwidCI6IjBiODAxMDU2LWZiODktNDYwNC1hODBmLWNiMDE3NzkyMmE3ZSJ9&pageName=ReportSectionf837d94d1e87aa77a59d" 
+                   style="text-decoration: none; color: inherit;">
+                    <div class="core-value">PORTFOLIO</div>
+                    <div class="core-label">CLICK TO VIEW</div>
+                </a>
+                <div class="language-toggle">
+                    <button class="lang-btn active" data-lang="en" onclick="switchLanguage('en')">EN</button>
+                    <button class="lang-btn" data-lang="ja" onclick="switchLanguage('ja')">日本語</button>
+                    <button class="lang-btn" data-lang="pt" onclick="switchLanguage('pt')">PT</button>
+                </div>
+				                <div class="powerbi-orbit-container" style="animation-delay: -8s;">
+                    <div class="powerbi-orbiter">
+                        <svg width="15" height="15" viewBox="0 0 20 20" style="animation-delay: -8s;">
+                            <rect x="2" y="10" width="4" height="8" fill="#F2C811" opacity="0.8"></rect>
+                            <rect x="8" y="6" width="4" height="12" fill="#F2C811" opacity="0.8"></rect>
+                            <rect x="14" y="2" width="4" height="16" fill="#F2C811" opacity="0.8"></rect>
+                        </svg>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="flow-line" style="top: 100px; left: 10%; width: 200px;"></div>
+        <div class="flow-line" style="bottom: 150px; right: 10%; width: 180px; animation-delay: 1s;"></div>
+        
+        <div class="attribution" id="attribution">By ripersonnalite@hotmail.com</div>
+    </div>
+
+    <script>
+        // --- JavaScript is unchanged from the previous version ---
+        const translations = {
+            en: {
+                center: { title: "PORTFOLIO", subtitle: "CLICK TO VIEW" },
+                segments: {
+                    "DEPENDENCY NETWORK": "DEPENDENCY NETWORK",
+                    "BITCOIN": "BITCOIN",
+                    "CAMPAIGN": "CAMPAIGN",
+                    "THE CAKE": "THE CAKE",
+                    "FLASHCARDS": "FLASHCARDS",
+                    "CANDLESTICK": "CANDLESTICK",
+                    "ETHEREUM": "ETHEREUM",
+                    "THE SERIES": "THE SERIES",
+                    "STOCKS": "STOCKS",
+                    "THE CTE": "THE CTE",
+                    "ARTICLES": "ARTICLES",
+                    "GRAB ME": "GRAB ME"
+                }
+            },
+            ja: {
+                center: { title: "ポートフォリオ", subtitle: "クリックして表示" },
+                segments: {
+                    "DEPENDENCY NETWORK": "依存関係ネットワーク",
+                    "BITCOIN": "ビットコイン",
+                    "CAMPAIGN": "キャンペーン",
+                    "THE CAKE": "ケーキ",
+                    "FLASHCARDS": "フラッシュカード",
+                    "CANDLESTICK": "ローソク足チャート",
+                    "ETHEREUM": "イーサリアム",
+                    "THE SERIES": "シリーズ",
+                    "STOCKS": "株価チャート",
+                    "THE CTE": "THE CTE",
+                    "ARTICLES": "しゅっぱんぶつ",
+                    "GRAB ME": "つかんで"
+                }
+            },
+            pt: {
+                center: { title: "PORTFÓLIO", subtitle: "CLIQUE PARA VER" },
+                segments: {
+                    "DEPENDENCY NETWORK": "DEPENDENCY NETWORK",
+                    "BITCOIN": "BITCOIN",
+                    "CAMPAIGN": "CAMPANHA",
+                    "THE CAKE": "O BOLO",
+                    "FLASHCARDS": "FLASHCARDS",
+                    "CANDLESTICK": "CANDLESTICK",
+                    "ETHEREUM": "ETHEREUM",
+                    "THE SERIES": "A SÉRIE",
+                    "STOCKS": "STOCKS",
+                    "THE CTE": "THE CTE",
+                    "ARTICLES": "ARTIGOS",
+                    "GRAB ME": "ARRASTE-ME"
+                }
+            }
+        };
+
+        let currentLanguage = 'en';
+
+        const segments = [
+            { title: "BITCOIN", link: "https://www.coinbase.com/price/bitcoin", type: "bitcoin" },
+            { title: "DEPENDENCY NETWORK", link: "https://cluster.ricardo.expert/?tab=network", type: "bars" },
+            { title: "ARTICLES", link: "https://articles.ricardo.expert", type: "articles" },
+            { title: "FLASHCARDS", link: "https://articles.ricardo.expert/the-science/data-carrer/flash-cards", type: "flashcards" },
+            { title: "THE CAKE", link: "https://portfolio.ricardo.expert/cake", type: "pie" },
+            { title: "CANDLESTICK", link: "https://cluster.ricardo.expert/?tab=compare", type: "gradient" },
+            { title: "ETHEREUM", link: "https://www.coinbase.com/price/ethereum", type: "ethereum" },
+            { title: "THE SERIES", link: "https://portfolio.ricardo.expert/theseries", type: "theseries" },
+            { title: "STOCKS", link: "https://cluster.ricardo.expert", type: "stocks" },
+            { title: "THE CTE", link: "https://cte.ricardo.expert", type: "cte_animation" },
+            { title: "CAMPAIGN", link: "https://portfolio.ricardo.expert/campaign", type: "campaign" },
+            { title: "GRAB ME", link: "#", type: "grid" }
+        ];
+
+        async function fetchCryptoPrices() {
+            try {
+                const btcResponse = await fetch('https://api.coinbase.com/v2/exchange-rates?currency=BTC');
+                const btcData = await btcResponse.json();
+                
+                if (btcData.data && btcData.data.rates && btcData.data.rates.USD) {
+                    const btcPrice = parseFloat(btcData.data.rates.USD);
+                    const btcChange = (Math.random() - 0.5) * 10; 
+                    
+                    const btcPriceElements = document.querySelectorAll('.btc-price');
+                    const btcChangeElements = document.querySelectorAll('.btc-change');
+                    const btcUpdateTexts = document.querySelectorAll('.update-text');
+                    
+                    btcPriceElements.forEach(el => {
+                        el.textContent = `${btcPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                    });
+                    
+                    btcChangeElements.forEach(el => {
+                        const changeColor = btcChange >= 0 ? '#00ff88' : '#ff4444';
+                        const changeSymbol = btcChange >= 0 ? '+' : '';
+                        el.innerHTML = `${changeSymbol}${btcChange.toFixed(2)}% (24h)`;
+                        el.style.color = changeColor;
+                    });
+                    
+                    btcUpdateTexts.forEach(el => {
+                        const now = new Date();
+                        el.textContent = `${now.toLocaleTimeString()}`;
+                    });
+                }
+                
+                const ethResponse = await fetch('https://api.coinbase.com/v2/exchange-rates?currency=ETH');
+                const ethData = await ethResponse.json();
+                
+                if (ethData.data && ethData.data.rates && ethData.data.rates.USD) {
+                    const ethPrice = parseFloat(ethData.data.rates.USD);
+                    const ethChange = (Math.random() - 0.5) * 10;
+                    
+                    const ethPriceElements = document.querySelectorAll('.eth-price');
+                    const ethChangeElements = document.querySelectorAll('.eth-change');
+                    const ethUpdateTexts = document.querySelectorAll('.update-text-eth');
+                    
+                    ethPriceElements.forEach(el => {
+                        el.textContent = `${ethPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                    });
+                    
+                    ethChangeElements.forEach(el => {
+                        const changeColor = ethChange >= 0 ? '#00ff88' : '#ff4444';
+                        const changeSymbol = ethChange >= 0 ? '+' : '';
+                        el.innerHTML = `${changeSymbol}${ethChange.toFixed(2)}% (24h)`;
+                        el.style.color = changeColor;
+                    });
+                    
+                    ethUpdateTexts.forEach(el => {
+                        const now = new Date();
+                        el.textContent = `${now.toLocaleTimeString()}`;
+                    });
+                }
+            } catch (error) {
+                console.error('Error fetching crypto prices from Coinbase:', error);
+                
+                try {
+                    const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true');
+                    const data = await response.json();
+                    
+                    if (data.bitcoin) {
+                        const price = data.bitcoin.usd;
+                        const change24h = data.bitcoin.usd_24h_change;
+                        
+                        const priceElements = document.querySelectorAll('.btc-price');
+                        const changeElements = document.querySelectorAll('.btc-change');
+                        const updateTexts = document.querySelectorAll('.update-text');
+                        
+                        priceElements.forEach(el => {
+                            el.textContent = `${price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                        });
+                        
+                        changeElements.forEach(el => {
+                            const changeColor = change24h >= 0 ? '#00ff88' : '#ff4444';
+                            const changeSymbol = change24h >= 0 ? '+' : '';
+                            el.innerHTML = `${changeSymbol}${change24h.toFixed(2)}% (24h)`;
+                            el.style.color = changeColor;
+                        });
+                        
+                        updateTexts.forEach(el => {
+                            const now = new Date();
+                            el.textContent = `${now.toLocaleTimeString()}`;
+                        });
+                    }
+                    
+                    if (data.ethereum) {
+                        const ethPrice = data.ethereum.usd;
+                        const ethChange = data.ethereum.usd_24h_change;
+                        
+                        const ethPriceElements = document.querySelectorAll('.eth-price');
+                        const ethChangeElements = document.querySelectorAll('.eth-change');
+                        const ethUpdateTexts = document.querySelectorAll('.update-text-eth');
+                        
+                        ethPriceElements.forEach(el => {
+                            el.textContent = `${ethPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                        });
+                        
+                        ethChangeElements.forEach(el => {
+                            const changeColor = ethChange >= 0 ? '#00ff88' : '#ff4444';
+                            const changeSymbol = ethChange >= 0 ? '+' : '';
+                            el.innerHTML = `${changeSymbol}${ethChange.toFixed(2)}% (24h)`;
+                            el.style.color = changeColor;
+                        });
+                        
+                        ethUpdateTexts.forEach(el => {
+                            const now = new Date();
+                            el.textContent = `${now.toLocaleTimeString()}`;
+                        });
+                    }
+                } catch (fallbackError) {
+                    console.error('Fallback API also failed:', fallbackError);
+                    
+                    const btcPriceElements = document.querySelectorAll('.btc-price');
+                    const ethPriceElements = document.querySelectorAll('.eth-price');
+                    [...btcPriceElements, ...ethPriceElements].forEach(el => {
+                        el.textContent = 'Error loading';
+                        el.style.color = '#ff4444';
+                    });
+                    
+                    const updateTexts = document.querySelectorAll('.update-text, .update-text-eth');
+                    updateTexts.forEach(el => {
+                        el.textContent = 'Connection error';
+                    });
+                }
+            }
+        }
+
+        function createVisualization(type) {
+             switch(type) {
+                case 'cte_animation':
+                    return `<div class="mini-chart" style="display: flex; align-items: center; justify-content: center;">
+                        <svg viewBox="0 0 100 100" width="80" height="80">
+                            <defs>
+                                <linearGradient id="panel2Gradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                                    <stop offset="0%" style="stop-color:#00ff88;" />
+                                    <stop offset="100%" style="stop-color:#00aa55;" />
+                                </linearGradient>
+                                <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+                                    <feGaussianBlur stdDeviation="2.5" result="coloredBlur"/>
+                                    <feMerge>
+                                        <feMergeNode in="coloredBlur"/>
+                                        <feMergeNode in="SourceGraphic"/>
+                                    </feMerge>
+                                </filter>
+                                <marker id="arrowhead" markerWidth="5" markerHeight="4" refX="2" refY="2" orient="auto">
+                                    <polygon points="0 0, 5 2, 0 4" fill="#00ff88" />
+                                </marker>
+                            </defs>
+                            
+                            <g opacity="0.1" stroke="white" stroke-width="0.5">
+                                <line x1="10" y1="20" x2="90" y2="20" />
+                                <line x1="10" y1="40" x2="90" y2="40" />
+                                <line x1="10" y1="60" x2="90" y2="60" />
+                                <line x1="10" y1="80" x2="90" y2="80" />
+                                <line x1="10" y1="20" x2="10" y2="80" />
+                                <line x1="90" y1="20" x2="90" y2="80" />
+                            </g>
+
+                            <rect x="25" y="70" width="50" height="20" rx="3" fill="#2d2d2d" stroke="#00d4ff" stroke-width="1" filter="url(#glow)" opacity="1">
+                                <animate attributeName="stroke" values="#00d4ff;#00d4ff;#00d4ff;#00d4ff;#00d4ff;transparent" keyTimes="0;0.2;0.4;0.6;0.8;1" dur="4s" repeatCount="indefinite" />
+                            </rect>
+                            <text x="50" y="82" font-family="monospace" font-size="8" fill="#00d4ff" text-anchor="middle">SELECT ...</text>
+
+                            <rect id="cteRect" x="20" y="20" width="60" height="30" rx="3" fill="#3a3a3a" stroke="#ff9e3d" stroke-width="1" filter="url(#glow)" opacity="0">
+                                <animate attributeName="opacity" values="0;1;1;1;0" keyTimes="0;0.1;0.7;0.9;1" dur="4s" repeatCount="indefinite"/>
+                            </rect>
+                            <text id="cteText" x="50" y="32" font-family="monospace" font-size="8" fill="#ff9e3d" text-anchor="middle" opacity="0">
+                                WITH CTE_Name AS
+                                <animate attributeName="opacity" values="0;1;1;1;0" keyTimes="0;0.1;0.7;0.9;1" dur="4s" repeatCount="indefinite"/>
+                            </text>
+                            <text id="cteSubText" x="50" y="42" font-family="monospace" font-size="7" fill="#ff9e3d" text-anchor="middle" opacity="0">
+                                (SELECT ...)
+                                <animate attributeName="opacity" values="0;1;1;1;0" keyTimes="0;0.15;0.7;0.9;1" dur="4s" repeatCount="indefinite"/>
+                            </text>
+
+                            <polyline id="arrow1" points="50,50 50,68" fill="none" stroke="#00ff88" stroke-width="2" opacity="0"
+                                      marker-end="url(#arrowhead)">
+                                <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.2;0.3;0.8;1" dur="4s" repeatCount="indefinite"/>
+                                <animate attributeName="stroke-dasharray" values="18;18" dur="4s" repeatCount="indefinite"/>
+                                <animate attributeName="stroke-dashoffset" values="18;0" dur="1s" begin="0.3s" repeatCount="indefinite"/>
+                            </polyline>
+
+                            <circle cx="50" cy="50" r="3" fill="#00ff88" opacity="0">
+                                <animateMotion path="M 0 0 L 0 18" begin="0.4s" dur="0.5s" fill="freeze" repeatCount="indefinite"/>
+                                <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.3;0.6;1" dur="4s" repeatCount="indefinite"/>
+                            </circle>
+                            
+                        </svg>
+                    </div>`;
+				case 'bars':
+					return `<div class="mini-chart">
+						<svg viewBox="0 0 100 100" width="80" height="80">
+							<g class="network-lines">
+								<line x1="50" y1="50" x2="25" y2="25" stroke="#4a9eff" stroke-width="1.5" opacity="0">
+									<animate attributeName="opacity" values="0;0.6;0.6;0" dur="4s" repeatCount="indefinite"/>
+									<animate attributeName="x2" values="50;25;25;50" dur="4s" repeatCount="indefinite"/>
+									<animate attributeName="y2" values="50;25;25;50" dur="4s" repeatCount="indefinite"/>
+								</line>
+								<line x1="50" y1="50" x2="75" y2="25" stroke="#4a9eff" stroke-width="1.5" opacity="0">
+									<animate attributeName="opacity" values="0;0;0.6;0.6;0" dur="4s" repeatCount="indefinite"/>
+									<animate attributeName="x2" values="50;50;75;75;50" dur="4s" repeatCount="indefinite"/>
+									<animate attributeName="y2" values="50;50;25;25;50" dur="4s" repeatCount="indefinite"/>
+								</line>
+								<line x1="50" y1="50" x2="75" y2="75" stroke="#00d4ff" stroke-width="1.5" opacity="0">
+									<animate attributeName="opacity" values="0;0;0;0.6;0.6;0" dur="4s" repeatCount="indefinite"/>
+									<animate attributeName="x2" values="50;50;50;75;75;50" dur="4s" repeatCount="indefinite"/>
+									<animate attributeName="y2" values="50;50;50;75;75;50" dur="4s" repeatCount="indefinite"/>
+								</line>
+								<line x1="50" y1="50" x2="25" y2="75" stroke="#00d4ff" stroke-width="1.5" opacity="0">
+									<animate attributeName="opacity" values="0;0.6;0.6;0" dur="4s" repeatCount="indefinite"/>
+									<animate attributeName="x2" values="50;25;25;50" dur="4s" repeatCount="indefinite"/>
+									<animate attributeName="y2" values="50;75;75;50" dur="4s" repeatCount="indefinite"/>
+								</line>
+								
+								<line x1="25" y1="25" x2="75" y2="25" stroke="#00ff88" stroke-width="1" opacity="0">
+									<animate attributeName="opacity" values="0;0;0.3;0.3;0" dur="4s" repeatCount="indefinite" begin="0.5s"/>
+								</line>
+								<line x1="75" y1="75" x2="75" y2="25" stroke="#00ff88" stroke-width="1" opacity="0">
+									<animate attributeName="opacity" values="0;0;0;0.3;0.3;0" dur="4s" repeatCount="indefinite" begin="0.5s"/>
+								</line>
+								<line x1="25" y1="75" x2="50" y2="20" stroke="#4a9eff" stroke-width="1" opacity="0">
+									<animate attributeName="opacity" values="0;0;0.2;0.2;0" dur="4s" repeatCount="indefinite" begin="1s"/>
+								</line>
+								<line x1="75" y1="75" x2="50" y2="80" stroke="#00d4ff" stroke-width="1" opacity="0">
+									<animate attributeName="opacity" values="0;0;0;0.2;0.2;0" dur="4s" repeatCount="indefinite" begin="1s"/>
+								</line>
+							</g>
+							
+							<circle cx="50" cy="50" r="5" fill="#00d4ff" opacity="0.9">
+								<animate attributeName="r" values="3;6;6;3" dur="4s" repeatCount="indefinite"/>
+								<animate attributeName="opacity" values="0.4;1;1;0.4" dur="4s" repeatCount="indefinite"/>
+							</circle>
+							
+							<circle cx="25" cy="25" r="0" fill="#4a9eff" opacity="0">
+								<animate attributeName="r" values="0;4;4;0" dur="4s" repeatCount="indefinite"/>
+								<animate attributeName="opacity" values="0;0.8;0.8;0" dur="4s" repeatCount="indefinite"/>
+							</circle>
+							<circle cx="75" cy="25" r="0" fill="#4a9eff" opacity="0">
+								<animate attributeName="r" values="0;0;4;4;0" dur="4s" repeatCount="indefinite"/>
+								<animate attributeName="opacity" values="0;0;0.8;0.8;0" dur="4s" repeatCount="indefinite"/>
+							</circle>
+							<circle cx="75" cy="75" r="0" fill="#00ff88" opacity="0">
+								<animate attributeName="r" values="0;0;0;4;4;0" dur="4s" repeatCount="indefinite"/>
+								<animate attributeName="opacity" values="0;0;0;0.8;0.8;0" dur="4s" repeatCount="indefinite"/>
+							</circle>
+							<circle cx="25" cy="75" r="0" fill="#00ff88" opacity="0">
+								<animate attributeName="r" values="0;4;4;0" dur="4s" repeatCount="indefinite"/>
+								<animate attributeName="opacity" values="0;0.8;0.8;0" dur="4s" repeatCount="indefinite"/>
+							</circle>
+							
+							<circle cx="50" cy="20" r="0" fill="#ff9e3d" opacity="0">
+								<animate attributeName="r" values="0;0;0;3;3;0" dur="4s" repeatCount="indefinite"/>
+								<animate attributeName="opacity" values="0;0;0;0.7;0.7;0" dur="4s" repeatCount="indefinite"/>
+							</circle>
+							<circle cx="50" cy="80" r="0" fill="#ff9e3d" opacity="0">
+								<animate attributeName="r" values="0;0;0;3;3;0" dur="4s" repeatCount="indefinite"/>
+								<animate attributeName="opacity" values="0;0;0;0.7;0.7;0" dur="4s" repeatCount="indefinite"/>
+							</circle>
+							<circle cx="15" cy="50" r="0" fill="#00d4ff" opacity="0">
+								<animate attributeName="r" values="0;0;0;3;3;0" dur="4s" repeatCount="indefinite"/>
+								<animate attributeName="opacity" values="0;0;0;0.6;0.6;0" dur="4s" repeatCount="indefinite"/>
+							</circle>
+							<circle cx="85" cy="50" r="0" fill="#00d4ff" opacity="0">
+								<animate attributeName="r" values="0;0;0;3;3;0" dur="4s" repeatCount="indefinite"/>
+								<animate attributeName="opacity" values="0;0;0;0.6;0.6;0" dur="4s" repeatCount="indefinite"/>
+							</circle>
+							
+							<circle cx="50" cy="50" r="8" fill="none" stroke="#00d4ff" stroke-width="1" opacity="0">
+								<animate attributeName="r" values="8;25;25" dur="4s" repeatCount="indefinite"/>
+								<animate attributeName="opacity" values="0.8;0;0" dur="4s" repeatCount="indefinite"/>
+							</circle>
+						</svg>
+					</div>`;
+                case 'bitcoin':
+                    return `<div class="bitcoin-container" style="width: 100%; margin-top: 15px; text-align: center;"><div style="font-size: 20px; color: #f7931a; margin-bottom: 5px;">₿</div><div class="btc-price" style="font-size: 18px; font-weight: bold; color: #00d4ff;">Loading...</div><div class="btc-change" style="font-size: 11px; margin-top: 5px;">--</div><div class="btc-update" style="font-size: 8px; color: rgba(255,255,255,0.3); margin-top: 8px;"><span class="update-indicator" style="display: inline-block; width: 6px; height: 6px; background: #00ff88; border-radius: 50%; margin-right: 3px; animation: pulse 2s infinite;"></span><span class="update-text">Updating...</span></div></div>`;
+                case 'ethereum':
+                    return `<div class="ethereum-container" style="width: 100%; margin-top: 15px; text-align: center;"><div style="font-size: 20px; color: #627eea; margin-bottom: 5px;">Ξ</div><div class="eth-price" style="font-size: 18px; font-weight: bold; color: #00d4ff;">Loading...</div><div class="eth-change" style="font-size: 11px; margin-top: 5px;">--</div><div class="eth-update" style="font-size: 8px; color: rgba(255,255,255,0.3); margin-top: 8px;"><span class="update-indicator" style="display: inline-block; width: 6px; height: 6px; background: #00ff88; border-radius: 50%; margin-right: 3px; animation: pulse 2s infinite;"></span><span class="update-text-eth">Updating...</span></div></div>`;
+                case 'pie':
+                    return `<div class="mini-chart"><div class="pie-viz" style="position: relative; left: 15%; background: conic-gradient(rgba(74, 158, 255, 0.4) 0deg 72deg, rgba(0, 212, 255, 0.4) 72deg 144deg, rgba(0, 255, 136, 0.4) 144deg 216deg, rgba(255, 158, 61, 0.4) 216deg 288deg, rgba(255, 68, 68, 0.4) 288deg 360deg); border: 1px solid rgba(255, 255, 255, 0.2);"></div></div>`;
+                case 'flashcards':
+                    return `<div class="mini-chart"><svg viewBox="0 0 100 100" width="70" height="70"><g opacity="0.8" transform="scale(1.15) translate(-7, -7)"><animateTransform attributeName="transform" type="rotate" values="-8 75 65;-5 75 65;-8 75 65" dur="6s" repeatCount="indefinite" additive="sum"/><rect x="65" y="50" width="35" height="45" rx="3" fill="rgba(74, 158, 255, 0.2)" stroke="#4a9eff"/></g><g opacity="0.9" transform="scale(1.15) translate(-7, -7)"><animateTransform attributeName="transform" type="rotate" values="5 70 60;8 70 60;5 70 60" dur="4s" repeatCount="indefinite" additive="sum"/><rect x="60" y="45" width="35" height="45" rx="3" fill="rgba(0, 212, 255, 0.3)" stroke="#00d4ff"/></g><g transform="scale(1.15) translate(-7, -7)"><animateTransform attributeName="transform" type="scale" values="1.15,1.15;0.115,1.15;1.15,1.15" dur="3s" repeatCount="indefinite" additive="sum"/><animateTransform attributeName="transform" type="translate" values="-7,-7;-7,-12;-7,-7" dur="3s" repeatCount="indefinite" additive="sum"/><rect x="55" y="40" width="35" height="45" rx="3" fill="rgba(0, 255, 136, 0.4)" stroke="#00ff88" stroke-width="2"><animate attributeName="fill" values="rgba(0, 255, 136, 0.4);rgba(0, 255, 136, 0.6);rgba(0, 255, 136, 0.4)" dur="3s" repeatCount="indefinite"/></rect><g><animate attributeName="opacity" values="1;0;1" dur="3s" repeatCount="indefinite"/><line x1="60" y1="50" x2="80" y2="50" stroke="white" opacity="0.8"/><line x1="60" y1="58" x2="75" y2="58" stroke="white" opacity="0.6"/><line x1="60" y1="65" x2="78" y2="65" stroke="white" opacity="0.6"/></g><g><animate attributeName="opacity" values="0;1;0" dur="3s" repeatCount="indefinite"/><circle cx="72" cy="57" r="8" fill="none" stroke="white" opacity="0.5" stroke-width="1.5"/><polyline points="68,57 71,60 77,54" stroke="white" opacity="0.7" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g></g><circle r="1.15" fill="#00ff88" opacity="0"><animate attributeName="opacity" values="0;0.8;0" dur="3s" begin="1.5s" repeatCount="indefinite"/><animateMotion path="M72,65 Q85,55 80,40" dur="3s" begin="1.5s" repeatCount="indefinite"/></circle><circle r="0.92" fill="#00d4ff" opacity="0"><animate attributeName="opacity" values="0;0.6;0" dur="3s" begin="1.7s" repeatCount="indefinite"/><animateMotion path="M75,63 Q65,50 70,35" dur="3s" begin="1.7s" repeatCount="indefinite"/></circle></svg></div>`;
+                case 'campaign':
+					return `<div class="mini-chart"><svg viewBox="0 0 100 100" width="80" height="80" style="transform: translateY(15%);"><g transform="translate(0, -10)"><g opacity="0.1"><line x1="10" y1="20" x2="10" y2="80" stroke="white"/><line x1="30" y1="20" x2="30" y2="80" stroke="white"/><line x1="50" y1="20" x2="50" y2="80" stroke="white"/><line x1="70" y1="20" x2="70" y2="80" stroke="white"/><line x1="90" y1="20" x2="90" y2="80" stroke="white"/><line x1="10" y1="80" x2="90" y2="80" stroke="white"/><line x1="10" y1="50" x2="90" y2="50" stroke="white"/><line x1="10" y1="20" x2="90" y2="20" stroke="white"/></g><polyline points="10,30 20,28 30,25 40,22 50,23 60,20 70,18 80,15 90,12" fill="none" stroke="#00ff88" stroke-width="2.5" opacity="0.9" stroke-dasharray="150" stroke-dashoffset="150"><animate attributeName="stroke-dashoffset" values="150;0" dur="2s" repeatCount="indefinite"/></polyline><polyline points="10,30 20,28 30,25 40,22 50,23 60,20 70,18 80,15 90,12" fill="none" stroke="#00ff88" stroke-width="5" opacity="0.3" filter="blur(3px)"><animate attributeName="opacity" values="0;0.3;0.3;0" dur="2s" repeatCount="indefinite"/></polyline><polyline points="10,45 18,42 25,40 33,38 42,35 50,33 58,35 67,32 75,30 83,28 90,25" fill="none" stroke="#4a9eff" stroke-width="2" opacity="0.8" stroke-dasharray="150" stroke-dashoffset="150"><animate attributeName="stroke-dashoffset" values="150;0" dur="2s" begin="0.3s" repeatCount="indefinite"/></polyline><polyline points="10,60 18,62 25,58 33,60 42,63 50,65 58,62 67,64 75,66 83,68 90,65" fill="none" stroke="#ff4a9e" stroke-width="2" opacity="0.8" stroke-dasharray="150" stroke-dashoffset="150"><animate attributeName="stroke-dashoffset" values="150;0" dur="2s" begin="0.3s" repeatCount="indefinite"/></polyline><polyline points="10,75 20,73 30,74 40,72 50,73 60,74 70,72 80,71 90,70" fill="none" stroke="#ff9e3d" stroke-width="1.5" opacity="0.7" stroke-dasharray="150" stroke-dashoffset="150"><animate attributeName="stroke-dashoffset" values="150;0" dur="2s" begin="0.6s" repeatCount="indefinite"/></polyline><g><circle cx="10" cy="30" r="0" fill="#00ff88"><animate attributeName="r" values="0;3;0" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;1;0" dur="2s" repeatCount="indefinite"/></circle><circle cx="50" cy="23" r="0" fill="#00ff88"><animate attributeName="r" values="0;3;0" dur="2s" begin="0.8s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;1;0" dur="2s" begin="0.8s" repeatCount="indefinite"/></circle><circle cx="90" cy="12" r="0" fill="#00ff88"><animate attributeName="r" values="0;3;0" dur="2s" begin="1.6s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;1;0" dur="2s" begin="1.6s" repeatCount="indefinite"/></circle></g><rect x="10" y="10" width="80" height="70" fill="none" stroke="#00d4ff" stroke-width="0.5" opacity="0" rx="5"><animate attributeName="opacity" values="0;0;0.3;0" dur="2s" repeatCount="indefinite"/></rect></g> <text x="50" y="95" font-size="8" fill="#00ff88" text-anchor="middle" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" dur="2s" repeatCount="indefinite"/><animate attributeName="y" values="95;95;90;90;95" dur="2s" repeatCount="indefinite"/>▲ 5.2K</text></svg></div>`;
+				case 'articles':
+    return `<div class="mini-chart"><svg viewBox="0 0 100 100" width="80" height="80"><defs><radialGradient id="bookGlow"><stop offset="0%" style="stop-color:#00ffcc;stop-opacity:0.2"/><stop offset="100%" style="stop-color:#00ffcc;stop-opacity:0"/></radialGradient><linearGradient id="bookGradient" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#00ffcc"/><stop offset="100%" style="stop-color:#00cc99"/></linearGradient></defs><circle cx="50" cy="50" r="35" fill="url(#bookGlow)"><animate attributeName="r" values="35;40;35" dur="3s" repeatCount="indefinite"/></circle><g transform="translate(50, 50)"><rect x="-18" y="-25" width="36" height="50" rx="2" fill="none" stroke="url(#bookGradient)" stroke-width="2" opacity="0.8"/><line x1="-15" y1="-22" x2="-15" y2="22" stroke="#00ffcc" stroke-width="1" opacity="0.4"/><line x1="-12" y1="-22" x2="-12" y2="22" stroke="#00ffcc" stroke-width="1" opacity="0.3"/><g transform-origin="-18 0"><rect x="-18" y="-25" width="36" height="50" rx="2" fill="none" stroke="url(#bookGradient)" stroke-width="2"><animateTransform attributeName="transform" type="rotateY" values="0;-150;-150;0" dur="4s" repeatCount="indefinite"/></rect><path d="M -5,-10 L -5,10 L 5,5 L 5,-15 Z" fill="url(#bookGradient)" opacity="0.6"><animateTransform attributeName="transform" type="rotateY" values="0;-150;-150;0" dur="4s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.6;0;0;0.6" dur="4s" repeatCount="indefinite"/></path></g><g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" dur="4s" repeatCount="indefinite"/><line x1="-10" y1="-15" x2="12" y2="-15" stroke="#00ffcc" stroke-width="1.5" opacity="0.5"/><line x1="-10" y1="-8" x2="8" y2="-8" stroke="#00ffcc" stroke-width="1.5" opacity="0.5"/><line x1="-10" y1="-1" x2="12" y2="-1" stroke="#00ffcc" stroke-width="1.5" opacity="0.5"/><line x1="-10" y1="6" x2="10" y2="6" stroke="#00ffcc" stroke-width="1.5" opacity="0.5"/><line x1="-10" y1="13" x2="12" y2="13" stroke="#00ffcc" stroke-width="1.5" opacity="0.5"/></g></g></svg></div>`;
+                case 'theseries':
+                    return `<div class="mini-chart" style="display: flex; align-items: center; justify-content: center;"><svg viewBox="0 0 100 100" width="80" height="80"><defs><linearGradient id="panel2Gradient" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#00ff88;" /><stop offset="100%" style="stop-color:#00aa55;" /></linearGradient><filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2.5" result="coloredBlur"/><feMerge><feMergeNode in="coloredBlur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><g filter="url(#glow)" opacity="0.9"><rect x="10" width="18" rx="3" fill="url(#panel2Gradient)"><animate attributeName="y" dur="4s" begin="0s" repeatCount="indefinite" values="90; 30; 60; 40; 90" keyTimes="0; 0.3; 0.6; 0.8; 1" calcMode="spline" keySplines="0.4 0 0.6 1; 0.4 0 0.6 1; 0.4 0 0.6 1; 0.4 0 0.6 1" /><animate attributeName="height" dur="4s" begin="0s" repeatCount="indefinite" values="10; 70; 40; 60; 10" keyTimes="0; 0.3; 0.6; 0.8; 1" calcMode="spline" keySplines="0.4 0 0.6 1; 0.4 0 0.6 1; 0.4 0 0.6 1; 0.4 0 0.6 1" /></rect><rect x="34" width="18" rx="3" fill="url(#panel2Gradient)"><animate attributeName="y" dur="3.6s" begin="0.5s" repeatCount="indefinite" values="90; 20; 70; 50; 90" keyTimes="0; 0.25; 0.5; 0.8; 1" calcMode="spline" keySplines="0.45 0 0.55 1; 0.45 0 0.55 1; 0.45 0 0.55 1; 0.45 0 0.55 1" /><animate attributeName="height" dur="3.6s" begin="0.5s" repeatCount="indefinite" values="10; 80; 30; 50; 10" keyTimes="0; 0.25; 0.5; 0.8; 1" calcMode="spline" keySplines="0.45 0 0.55 1; 0.45 0 0.55 1; 0.45 0 0.55 1; 0.45 0 0.55 1" /></rect><rect x="58" width="18" rx="3" fill="url(#panel2Gradient)"><animate attributeName="y" dur="4.1s" begin="-0.2s" repeatCount="indefinite" values="90; 40; 80; 30; 90" keyTimes="0; 0.3; 0.5; 0.75; 1" calcMode="spline" keySplines="0.38 0 0.62 1; 0.38 0 0.62 1; 0.38 0 0.62 1; 0.38 0 0.62 1" /><animate attributeName="height" dur="4.1s" begin="-0.2s" repeatCount="indefinite" values="10; 60; 20; 70; 10" keyTimes="0; 0.3; 0.5; 0.75; 1" calcMode="spline" keySplines="0.38 0 0.62 1; 0.38 0 0.62 1; 0.38 0 0.62 1; 0.38 0 0.62 1" /></rect><rect x="82" width="18" rx="3" fill="url(#panel2Gradient)"><animate attributeName="y" dur="3.9s" begin="0.2s" repeatCount="indefinite" values="90; 25; 65; 45; 90" keyTimes="0; 0.2; 0.6; 0.8; 1" calcMode="spline" keySplines="0.4 0.1 0.6 0.9; 0.4 0.1 0.6 0.9; 0.4 0.1 0.6 0.9; 0.4 0.1 0.6 0.9" /><animate attributeName="height" dur="3.9s" begin="0.2s" repeatCount="indefinite" values="10; 75; 35; 55; 10" keyTimes="0; 0.2; 0.6; 0.8; 1" calcMode="spline" keySplines="0.4 0.1 0.6 0.9; 0.4 0.1 0.6 0.9; 0.4 0.1 0.6 0.9; 0.4 0.1 0.6 0.9" /></rect></g></svg></div>`;
+                case 'gradient':
+                    return `<div class="mini-chart" style="position: relative;"><div style="position: absolute; width: 100%; height: 100%;"><div style="position: absolute; left: 16%; top: 25%; width: 8px; height: 40px; animation: greenCandleMove 3s ease-in-out infinite;"><div style="width: 100%; height: 1px; background: #00ff88; opacity: 0.6; position: absolute; top: -10px; height: 60px;"></div><div style="width: 100%; height: 20px; background: #00ff88; opacity: 0.8; position: absolute; top: 10px;"></div></div><div style="position: absolute; left: 31%; top: 20%; width: 8px; height: 50px; animation: redCandleMove 3s ease-in-out infinite 0.5s;"><div style="width: 100%; height: 1px; background: #ff4444; opacity: 0.6; position: absolute; top: -10px; height: 60px;"></div><div style="width: 100%; height: 25px; background: #ff4444; opacity: 0.8; position: absolute; top: 10px;"></div></div><div style="position: absolute; left: 46%; top: 15%; width: 8px; height: 40px; animation: greenCandleMove 3s ease-in-out infinite 1s;"><div style="width: 100%; height: 1px; background: #00ff88; opacity: 0.6; position: absolute; top: -10px; height: 50px;"></div><div style="width: 100%; height: 15px; background: #00ff88; opacity: 0.8; position: absolute; top: 10px;"></div></div><div style="position: absolute; left: 61%; top: 30%; width: 8px; height: 45px; animation: greenCandleMove 3s ease-in-out infinite 1.5s;"><div style="width: 100%; height: 1px; background: #00ff88; opacity: 0.6; position: absolute; top: -10px; height: 55px;"></div><div style="width: 100%; height: 25px; background: #00ff88; opacity: 0.8; position: absolute; top: 10px;"></div></div><div style="position: absolute; left: 76%; top: 35%; width: 8px; height: 45px; animation: redCandleMove 3s ease-in-out infinite 2s;"><div style="width: 100%; height: 1px; background: #ff4444; opacity: 0.6; position: absolute; top: -10px; height: 55px;"></div><div style="width: 100%; height: 20px; background: #ff4444; opacity: 0.8; position: absolute; top: 15px;"></div></div></div><style>@keyframes greenCandleMove {0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); }} @keyframes redCandleMove {0%, 100% { transform: translateY(0); } 50% { transform: translateY(10px); }}</style></div>`;
+                case 'stocks':
+                    return `<div class="mini-chart" style="position: relative; bottom: 10%;"><svg class="line-viz" viewBox="0 0 100 100"><defs><filter id="stockGlow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="1.5" result="coloredBlur"/><feMerge><feMergeNode in="coloredBlur"/><feMergeNode in="SourceGraphic"/></feMerge></filter><linearGradient id="gainGradient" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#00ff88;" /><stop offset="100%" style="stop-color:#00aa55;" /></linearGradient><linearGradient id="lossGradient" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#ff4a9e;" /><stop offset="100%" style="stop-color:#cc2266;" /></linearGradient></defs><g opacity="0.1" stroke="white" stroke-width="0.5"><line x1="10" y1="20" x2="90" y2="20" /><line x1="10" y1="40" x2="90" y2="40" /><line x1="10" y1="60" x2="90" y2="60" /><line x1="10" y1="80" x2="90" y2="80" /><line x1="10" y1="20" x2="10" y2="80" /><line x1="90" y1="20" x2="90" y2="80" /></g><polyline points="10,70 25,55 40,60 55,45 70,50 85,30" fill="none" stroke="#00d4ff" stroke-width="2" filter="url(#stockGlow)" opacity="0.8" stroke-dasharray="100" stroke-dashoffset="100"><animate attributeName="stroke-dashoffset" values="100;0" dur="2s" repeatCount="indefinite"/></polyline><g filter="url(#stockGlow)"><rect x="20" y="50" width="8" height="15" rx="1" fill="url(#gainGradient)" opacity="0"><animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.1;0.7;1" dur="4s" repeatCount="indefinite" begin="0.2s"/><animate attributeName="height" values="5;15;10;5" keyTimes="0;0.1;0.5;1" dur="4s" repeatCount="indefinite" begin="0.2s"/><animate attributeName="y" values="60;50;55;60" keyTimes="0;0.1;0.5;1" dur="4s" repeatCount="indefinite" begin="0.2s"/></rect><rect x="45" y="60" width="8" height="10" rx="1" fill="url(#lossGradient)" opacity="0"><animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.3;0.8;1" dur="4s" repeatCount="indefinite" begin="0.5s"/><animate attributeName="height" values="5;10;15;5" keyTimes="0;0.1;0.5;1" dur="4s" repeatCount="indefinite" begin="0.5s"/><animate attributeName="y" values="65;60;55;65" keyTimes="0;0.1;0.5;1" dur="4s" repeatCount="indefinite" begin="0.5s"/></rect><rect x="70" y="30" width="8" height="25" rx="1" fill="url(#gainGradient)" opacity="0"><animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.5;0.9;1" dur="4s" repeatCount="indefinite" begin="0.8s"/><animate attributeName="height" values="5;25;18;5" keyTimes="0;0.1;0.5;1" dur="4s" repeatCount="indefinite" begin="0.8s"/><animate attributeName="y" values="55;30;37;55" keyTimes="0;0.1;0.5;1" dur="4s" repeatCount="indefinite" begin="0.8s"/></rect></g><g opacity="0.7"><circle cx="15" cy="75" r="2" fill="#ff9e3d"><animate attributeName="r" values="2;3;2" dur="2s" repeatCount="indefinite" /><animate attributeName="opacity" values="0.7;1;0.7" dur="2s" repeatCount="indefinite" /></circle><circle cx="80" cy="25" r="2" fill="#ff9e3d"><animate attributeName="r" values="2;3;2" dur="2s" repeatCount="indefinite" begin="1s"/><animate attributeName="opacity" values="0.7;1;0.7" dur="2s" repeatCount="indefinite" begin="1s"/></circle><circle cx="50" cy="50" r="1.5" fill="white" opacity="0"><animate attributeName="opacity" values="0;1;0" dur="1.5s" begin="0.5s" repeatCount="indefinite"/><animateMotion path="M0 0 L 5 -5" dur="1.5s" begin="0.5s" repeatCount="indefinite" /></circle></g></svg></div>`;
+                case 'grid':
+                    return `<div class="mini-chart"><svg class="line-viz" viewBox="0 0 100 100"><rect x="20" y="30" width="60" height="40" fill="rgba(0, 212, 255, 0.2)" stroke="#00d4ff" stroke-width="2"/><line x1="20" y1="50" x2="80" y2="50" stroke="#00ff88" stroke-width="2"/></svg><div class="grab-indicator"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0"/><path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8"/><path d="M18 11v0a2 2 0 1 1 4 0v3a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.5-2.34l-3.5-6.66V13a2 2 0 0 1 2-2v0a2 2 0 0 1 2 2v0"/></svg></div></div>`;
+                default:
+                    return `<div class="mini-chart"></div>`;
+            }
+        }
+
+        function generateSegments() {
+            const wrapper = document.getElementById('orbitalWrapper');
+            wrapper.innerHTML = '';
+            
+            const segmentsWithOrbiters = ['DEPENDENCY NETWORK', 'CAMPAIGN', 'THE CAKE', 'THE SERIES'];
+
+            segments.forEach((segment, index) => {
+                const angle = (index / segments.length) * 2 * Math.PI;
+				const radius = 200;
+				const centerX = 200;
+				const centerY = 200;
+				const x = centerX + radius * Math.cos(angle);
+				const y = centerY + radius * Math.sin(angle);
+                
+                const segmentDiv = document.createElement('div');
+                segmentDiv.className = 'carousel-segment';
+                
+                if (segment.title === 'GRAB ME') {
+                    segmentDiv.classList.add('grab-me-segment');
+                }
+                
+                if (!segment.link || segment.link === '#') {
+                    segmentDiv.classList.add('no-link');
+                }
+                
+                segmentDiv.style.top = `${y}px`;
+				segmentDiv.style.left = `${x}px`;
+                segmentDiv.style.transform = 'translate(-50%, -50%)';
+                
+                const innerDiv = document.createElement('div');
+                innerDiv.className = 'segment-inner';
+                
+                const translatedTitle = translations[currentLanguage].segments[segment.title] || segment.title;
+                const visualizationHTML = createVisualization(segment.type);
+                let additionalHTML = '';
+
+                // MODIFICATION: Added logic for de-synchronized animation delay
+                if (segmentsWithOrbiters.includes(segment.title)) {
+                    const orbiterIndex = segmentsWithOrbiters.indexOf(segment.title);
+                    const delay = orbiterIndex * -2; // Creates delays of 0, -2, -4, -6 seconds
+
+                    additionalHTML = `
+                        <div class="powerbi-orbit-container" style="animation-delay: ${delay}s;">
+                            <div class="powerbi-orbiter">
+                                <svg width="15" height="15" viewBox="0 0 20 20" style="animation-delay: ${delay}s;">
+                                    <rect x="2" y="10" width="4" height="8" fill="#F2C811" opacity="0.8"></rect>
+                                    <rect x="8" y="6" width="4" height="12" fill="#F2C811" opacity="0.8"></rect>
+                                    <rect x="14" y="2" width="4" height="16" fill="#F2C811" opacity="0.8"></rect>
+                                </svg>
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                // MODIFICATION: Wrapped visualizationHTML in the new .viz-clipper div
+                const contentHTML = `
+                    <div class="segment-title">${translatedTitle}</div>
+                    <div class="viz-clipper">
+                        ${visualizationHTML}
+                    </div>
+                    ${additionalHTML}
+                `;
+
+                if (segment.link && segment.link !== '#') {
+                    innerDiv.innerHTML = `<a href="${segment.link}" class="segment-link">${contentHTML}</a>`;
+                } else {
+                    innerDiv.innerHTML = contentHTML;
+                }
+                
+                segmentDiv.appendChild(innerDiv);
+                wrapper.appendChild(segmentDiv);
+            });
+        }
+
+        function switchLanguage(lang) {
+            const orbitalWrapper = document.getElementById('orbitalWrapper');
+            let currentRotation = 0;
+            const transform = window.getComputedStyle(orbitalWrapper).transform;
+
+            if (transform !== 'none') {
+                const values = transform.split('(')[1].split(')')[0].split(',');
+                const a = values[0];
+                const b = values[1];
+                currentRotation = Math.atan2(b, a) * (180 / Math.PI);
+            }
+
+            orbitalWrapper.style.animation = 'none';
+            orbitalWrapper.style.transform = `rotate(${currentRotation}deg)`;
+
+            currentLanguage = lang;
+            
+            const centerCore = document.getElementById('centerCore');
+            const coreValueEl = centerCore.querySelector('.core-value');
+            const trans = translations[currentLanguage].center;
+            
+            coreValueEl.textContent = trans.title;
+            centerCore.querySelector('.core-label').textContent = trans.subtitle;
+
+            if (lang === 'ja') {
+                coreValueEl.style.fontSize = '23.8px';
+            } else {
+                coreValueEl.style.fontSize = '';
+            }
+            
+            document.querySelectorAll('.lang-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.lang === lang);
+            });
+            
+            generateSegments();
+
+            document.querySelectorAll('.segment-inner').forEach(inner => {
+                inner.style.animation = 'none';
+                inner.style.transform = `rotate(${-currentRotation}deg)`;
+            });
+
+            initializeDragFunctionality();
+        }
+
+        function initializeDragFunctionality() {
+            const orbitalWrapper = document.getElementById('orbitalWrapper');
+            const carouselContainer = document.querySelector('.carousel-container');
+            let isDragging = false;
+            let startAngle = 0;
+            let currentRotation = 0;
+            let animationPausedAt = 0;
+            let dragStartTime = 0;
+            let lastMouseX = 0;
+            let lastMouseY = 0;
+            let velocity = 0;
+            let momentumAnimation = null;
+            
+            function getCurrentRotation() {
+                const transform = window.getComputedStyle(orbitalWrapper).transform;
+                if (transform === 'none') return 0;
+                
+                const values = transform.split('(')[1].split(')')[0].split(',');
+                const a = values[0];
+                const b = values[1];
+                let angle = Math.atan2(b, a) * (180 / Math.PI);
+                return angle;
+            }
+            
+            function getAngleFromCenter(clientX, clientY) {
+                const rect = carouselContainer.getBoundingClientRect();
+                const centerX = rect.left + rect.width / 2;
+                const centerY = rect.top + rect.height / 2;
+                
+                const deltaX = clientX - centerX;
+                const deltaY = clientY - centerY;
+                
+                return Math.atan2(deltaY, deltaX) * (180 / Math.PI);
+            }
+            
+            function startDrag(e) {
+                const target = e.target.closest('.carousel-segment');
+                if (!target) return;
+                
+                if (e.target.closest('a') && !e.ctrlKey && !e.metaKey) return;
+                
+                e.preventDefault();
+                isDragging = true;
+                dragStartTime = Date.now();
+                
+                if (momentumAnimation) {
+                    cancelAnimationFrame(momentumAnimation);
+                    momentumAnimation = null;
+                }
+                
+                animationPausedAt = getCurrentRotation();
+                currentRotation = animationPausedAt;
+                orbitalWrapper.classList.add('dragging');
+                orbitalWrapper.style.animation = 'none';
+                orbitalWrapper.style.transform = `rotate(${currentRotation}deg)`;
+                
+                document.querySelectorAll('.segment-inner').forEach((inner) => {
+                    const currentInnerRotation = -currentRotation;
+                    inner.style.animation = 'none';
+                    inner.style.transform = `rotate(${currentInnerRotation}deg)`;
+                });
+                
+                target.classList.add('dragging');
+                
+                const clientX = e.type.includes('touch') ? e.touches[0].clientX : e.clientX;
+                const clientY = e.type.includes('touch') ? e.touches[0].clientY : e.clientY;
+                startAngle = getAngleFromCenter(clientX, clientY);
+                lastMouseX = clientX;
+                lastMouseY = clientY;
+                
+                if (e.type.includes('touch')) {
+                    document.addEventListener('touchmove', drag, { passive: false });
+                    document.addEventListener('touchend', endDrag);
+                    document.addEventListener('touchcancel', endDrag);
+                } else {
+                    document.addEventListener('mousemove', drag);
+                    document.addEventListener('mouseup', endDrag);
+                }
+            }
+            
+            function drag(e) {
+                if (!isDragging) return;
+                e.preventDefault();
+                
+                const clientX = e.type.includes('touch') ? e.touches[0].clientX : e.clientX;
+                const clientY = e.type.includes('touch') ? e.touches[0].clientY : e.clientY;
+                
+                const currentAngle = getAngleFromCenter(clientX, clientY);
+                let deltaAngle = currentAngle - startAngle;
+                
+                if (deltaAngle > 180) deltaAngle -= 360;
+                if (deltaAngle < -180) deltaAngle += 360;
+                
+                const deltaX = clientX - lastMouseX;
+                const deltaY = clientY - lastMouseY;
+                const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+                velocity = distance * Math.sign(deltaAngle) * 0.5;
+                
+                lastMouseX = clientX;
+                lastMouseY = clientY;
+                
+                currentRotation = animationPausedAt + deltaAngle;
+                orbitalWrapper.style.transform = `rotate(${currentRotation}deg)`;
+                
+                document.querySelectorAll('.segment-inner').forEach(inner => {
+                    inner.style.transform = `rotate(${-currentRotation}deg)`;
+                });
+            }
+            
+            function endDrag(e) {
+                if (!isDragging) return;
+                isDragging = false;
+                
+                orbitalWrapper.classList.remove('dragging');
+                document.querySelectorAll('.dragging').forEach(el => el.classList.remove('dragging'));
+                
+                document.removeEventListener('mousemove', drag);
+                document.removeEventListener('mouseup', endDrag);
+                document.removeEventListener('touchmove', drag);
+                document.removeEventListener('touchend', endDrag);
+                document.removeEventListener('touchcancel', endDrag);
+                
+                const dragDuration = Date.now() - dragStartTime;
+                
+                if (dragDuration < 200 && Math.abs(velocity) > 2) {
+                    applyMomentum();
+                } else {
+                    resumeAnimation();
+                }
+            }
+            
+            function applyMomentum() {
+                let momentum = velocity * 3;
+                const friction = 0.95;
+                
+                function animate() {
+                    if (Math.abs(momentum) < 0.1) {
+                        resumeAnimation();
+                        return;
+                    }
+                    
+                    currentRotation += momentum;
+                    orbitalWrapper.style.transform = `rotate(${currentRotation}deg)`;
+                    
+                    document.querySelectorAll('.segment-inner').forEach(inner => {
+                        inner.style.transform = `rotate(${-currentRotation}deg)`;
+                    });
+                    
+                    momentum *= friction;
+                    momentumAnimation = requestAnimationFrame(animate);
+                }
+                
+                animate();
+            }
+            
+            function resumeAnimation() { }
+            
+            document.querySelectorAll('.carousel-segment').forEach(segment => {
+                segment.addEventListener('mousedown', startDrag);
+                segment.addEventListener('touchstart', startDrag, { passive: false });
+                segment.addEventListener('dragstart', e => e.preventDefault());
+            });
+            
+            document.addEventListener('click', function(e) {
+                if (e.target.closest('.carousel-segment a, .center-core a')) {
+                    if (Date.now() - dragStartTime < 200 && isDragging === false) {
+                        e.preventDefault();
+                    }
+                }
+            }, true);
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            generateSegments();
+            initializeDragFunctionality();
+            fetchCryptoPrices();
+            setInterval(fetchCryptoPrices, 10000);
+        });
+    </script>
+</body>
+</html>
